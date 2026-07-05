@@ -1,0 +1,26 @@
+{
+  "name": "local-amp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A local FFmpeg-backed music player with playlists and metadata extraction.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "node --check src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "compression": "^1.8.1",
+    "express": "^5.2.1",
+    "p-limit": "^7.3.0"
+  },
+  "devDependencies": {
+    "eslint": "^10.6.0",
+    "nodemon": "^3.1.14",
+    "prettier": "^3.9.4"
+  }
+}

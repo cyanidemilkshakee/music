@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Apple Music - Local</title>
+    <meta name="description" content="High-fidelity local music player with an Apple Music macOS interface.">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <!-- Import Sheet Overlay -->
+    <div class="import-sheet is-hidden" id="importSheet">
+      <div class="import-sheet-inner">
+        <h3>Add to Library</h3>
+        <p style="color: var(--text-sub); margin-bottom: 17.8px; font-size: 14.65px;">Enter the absolute path to your music folder.</p>
+        <div style="display:flex; gap:9.4px;">
+          <input id="folderInputSheet" class="import-input" type="text" spellcheck="false" placeholder="C:\Music">
+          <button id="importButtonSheet" class="import-btn" type="button">Import</button>
+        </div>
+        <div id="importStatusSheet" class="import-status"></div>
+        <button class="sheet-close-btn" id="importSheetClose">Cancel</button>
+      </div>
+    </div>
+
+    <div class="app-shell">
+      
+      <!-- ── Left Sidebar (Vibrancy) ────────────────────────────────── -->
+      <nav class="sidebar" aria-label="Main Navigation">
+        <!-- macOS Traffic Lights Removed -->
+        
+        <div class="sidebar-content">
+          <button id="sidebarImportButton" class="am-btn" style="margin-bottom: 10px; padding: 6px; font-size: 13px;">Add Folder...</button>
+          <div class="search-box">
+            <span data-icon="search" class="search-icon"></span>
+            <input id="searchInput" type="search" placeholder="Search" autocomplete="off">
+          </div>
+
+          <ul class="nav-list main-nav">
+            <li>
+              <button class="nav-item is-active" data-view="home">
+                <span data-icon="home" class="nav-icon"></span>
+                <span>Home</span>
+              </button>
+            </li>
+          </ul>
+
+          <div class="nav-section">
+            <h3 class="section-title">Library</h3>
+            <ul class="nav-list">
+              <li>
+                <button class="nav-item" data-view="recent">
+                  <span data-icon="time" class="nav-icon"></span>
+                  <span>Recently Added</span>
+                </button>
+              </li>
+              <li>
+                <button class="nav-item" data-view="artists">
+                  <span data-icon="mic" class="nav-icon"></span>
+                  <span>Artists</span>
+                </button>
+              </li>
+              <li>
+                <button class="nav-item" data-view="albums">
+                  <span data-icon="album" class="nav-icon"></span>
+                  <span>Albums</span>
+                </button>
+              </li>
+              <li>
+                <button class="nav-item" data-view="songs">
+                  <span data-icon="note" class="nav-icon"></span>
+                  <span>Songs</span>
+                </button>
+              </li>
+            </ul>
+            </div>
+
+          <div class="nav-section" style="flex: 1; display: flex; flex-direction: column; overflow: hidden;">
+            <div style="display: flex; align-items: center; justify-content: space-between; padding-right: 13.6px;">
+              <h3 class="section-title">Playlists</h3>
+              <button class="icon-btn-small" id="importSmallButton" title="New Playlist" aria-label="New Playlist"><span data-icon="plus"></span></button>
+            </div>
+            <ul class="nav-list playlist-nav">
+              <li>
+                <button class="nav-item" data-view="playlists">
+                  <span data-icon="playlist" class="nav-icon"></span>
+                  <span>All Playlists</span>
+                </button>
+              </li>
+            </ul>
+            <div class="playlist-scroll">
+               <ul class="nav-list" id="sidebarPlaylistList">
+                 <!-- User playlists populated here -->
+               </ul>
+            </div>
+          </div>
+        </div>
+      </nav>
+
+      <!-- ── Main Content Area ────────────────────────────────────────── -->
+      <main class="main-view" id="mainView">
+        
+        <!-- Import Panel (shown when empty) -->
+        <section class="empty-state-panel" id="importPanel">
+          <div class="empty-inner">
+            <span data-icon="library-large" class="empty-icon"></span>
+            <h2>Your Library is Empty</h2>
+            <p>Add folders to your library to see your music here.</p>
+            <button id="importMainButton" class="am-btn">Add Folder...</button>
+          </div>
+        </section>
+
+        <!-- Grid Content -->
+        <div class="content-scroll is-hidden" id="contentScroll">
+          <div class="section-header">
+            <div class="section-heading">
+              <button class="chevron" id="backButton" title="Back" style="background: none; border: none; padding: 0; margin: 0; cursor: pointer; pointer-events: none; opacity: 0.5;"><span data-icon="chevron-left"></span></button>
+              <h1 class="page-title" id="viewTitle">Library</h1>
+            </div>
+            <div class="section-actions">
+              <button class="icon-btn header-toggle" id="layoutToggleButton" title="Switch to List" aria-label="Switch to List">
+                <span data-icon="list"></span>
+              </button>
+            </div>
+          </div>
+          
+          <div class="list-headers is-hidden" id="listHeaders">
+            <div class="header-col header-empty"></div>
+            <button class="header-col" data-sort="title">Title <span class="sort-icon"></span></button>
+            <button class="header-col" data-sort="album">Album <span class="sort-icon"></span></button>
+            <button class="header-col" data-sort="duration" style="justify-content: flex-end;">Length <span class="sort-icon"></span></button>
+          </div>
+
+          <div class="grid-container" id="trackGrid">
+            <!-- Cards populated here -->
+          </div>
+        </div>
+
+        <!-- ── Floating Player Pill ────────────────────────────────────────── -->
+        <div class="player-pill" id="playerPill">
+
+          <!-- Left: Now Playing Info -->
+          <div class="pill-left">
+            <div class="np-art">
+              <img id="coverImage" src="/assets/default-cover.png" alt="">
+            </div>
+            <div class="np-info-col">
+              <div class="np-title"  id="trackTitle">Not Playing</div>
+              <div class="np-artist" id="trackArtist">Local Amp</div>
+            </div>
+          </div>
+
+          <!-- Center: Scrubber & Controls -->
+          <div class="pill-center">
+            <div class="scrubber-wrap">
+              <span class="time-label" id="currentTime">0:00</span>
+              <div class="scrubber-bar" id="scrubberBar">
+                <div class="scrubber-bg">
+                  <div class="scrubber-progress" id="scrubberProgress"></div>
+                  <div class="scrubber-handle"   id="scrubberHandle"></div>
+                </div>
+              </div>
+              <span class="time-label" id="timeRemaining">-0:00</span>
+            </div>
+            <div class="transport-controls">
+              <button class="icon-btn"          id="shuffleButton" title="Shuffle"><span data-icon="shuffle"></span></button>
+              <button class="icon-btn"          id="prevButton"    title="Previous"><span data-icon="skip-back"></span></button>
+              <button class="icon-btn play-btn" id="playButton"    title="Play"><span data-icon="play-solid"></span></button>
+              <button class="icon-btn"          id="nextButton"    title="Next"><span data-icon="skip-forward"></span></button>
+              <button class="icon-btn"          id="repeatButton"  title="Repeat"><span data-icon="repeat"></span></button>
+            </div>
+          </div>
+
+          <!-- Right: Volume & Actions -->
+          <div class="pill-right">
+            <button class="icon-btn" id="moreButton"  title="More"><span data-icon="more"></span></button>
+            <button class="icon-btn" id="queueButton" title="Queue"><span data-icon="queue"></span></button>
+            <div class="volume-container">
+              <button class="icon-btn" id="muteBtn"><span data-icon="volume-high"></span></button>
+              <div class="vol-slider-wrap" id="volScrubberBg">
+                <div class="scrubber-bg">
+                  <div class="scrubber-progress vol-progress" id="volProgress"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div><!-- /player-pill -->
+
+        <!-- Queue Panel -->
+        <aside class="queue-panel" id="queuePanel" aria-hidden="true">
+          <div class="queue-header">
+            <div>
+              <h2>Queue</h2>
+              <p id="queueCount">0 songs</p>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <button class="queue-clear" id="queueClearButton" type="button">Clear</button>
+              <button class="icon-btn" id="queueCloseButton" title="Close"><span data-icon="x"></span></button>
+            </div>
+          </div>
+          <div class="queue-list" id="queueList"></div>
+        </aside>
+
+      </main>
+    </div><!-- /app-shell -->
+
+    <!-- Context Menu -->
+    <div id="contextMenu" class="context-menu" aria-hidden="true"></div>
+    
+    <audio id="audio"></audio>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
