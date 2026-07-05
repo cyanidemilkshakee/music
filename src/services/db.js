@@ -227,6 +227,20 @@ function getPlaylistById(id) {
   return hydratePlaylist(db.prepare('SELECT * FROM playlists WHERE id = ?').get(id));
 }
 
+function updatePlaylistName(playlistId, name) {
+  const playlist = getPlaylistById(playlistId);
+  if (!playlist) throw httpError(404, 'Playlist not found.');
+
+  db.prepare('UPDATE playlists SET name = ?, updatedAt = ? WHERE id = ?')
+    .run(normalizePlaylistName(name), nowIso(), playlistId);
+  return getPlaylistById(playlistId);
+}
+
+function deletePlaylist(playlistId) {
+  const result = db.prepare('DELETE FROM playlists WHERE id = ?').run(playlistId);
+  if (result.changes === 0) throw httpError(404, 'Playlist not found.');
+}
+
 const createPlaylistTx = db.transaction(playlist => {
   const now = nowIso();
   const nextPlaylist = {
@@ -380,6 +394,8 @@ module.exports = {
   getAllPlaylists,
   getPlaylistById,
   createPlaylist,
+  updatePlaylistName,
+  deletePlaylist,
   addTrackToPlaylist,
   removeTrackFromPlaylist,
   addRecent,

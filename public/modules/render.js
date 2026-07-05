@@ -34,6 +34,10 @@ export function renderPlaylistsSidebar() {
       <button class="nav-item ${p.id === state.activePlaylistId ? "is-active" : ""}"
               data-playlist-id="${esc(p.id)}">
         <span>${esc(p.name)}</span>
+        <span class="playlist-inline-actions">
+          <span class="playlist-mini-action" data-playlist-rename="${esc(p.id)}" title="Rename playlist">${icons.edit || icons.album}</span>
+          <span class="playlist-mini-action" data-playlist-delete="${esc(p.id)}" title="Delete playlist">${icons.x}</span>
+        </span>
       </button>
     </li>`).join("");
 }
@@ -64,6 +68,10 @@ function renderPlaylistCollection() {
         <div class="card-copy">
           <div class="card-title">${esc(playlist.name)}</div>
           <div class="card-subtitle">${esc(summary)}</div>
+        </div>
+        <div class="playlist-card-actions">
+          <button class="card-glass-action" data-playlist-rename="${esc(playlist.id)}" type="button">Rename</button>
+          <button class="card-glass-action danger" data-playlist-delete="${esc(playlist.id)}" type="button">Delete</button>
         </div>
         <div class="card-meta">Playlist</div>
         <div class="card-duration">${esc(summary)}</div>
@@ -138,6 +146,7 @@ export function renderGrid() {
   }
 
   const audio = el.audio;
+  const playlist = activePlaylist();
   el.trackGrid.innerHTML = tracks.map(track => {
     const isCurrent  = track.id === state.currentTrackId;
     const isPlaying  = isCurrent && !audio.paused;
@@ -152,6 +161,10 @@ export function renderGrid() {
         <div class="card-art">
           <img src="${coverUrl(track)}" alt="" loading="lazy" onerror="this.onerror=null;this.src='${DEFAULT_COVER}'">
           <div class="card-play" data-play-btn="true">${icons.play_pause_morph}</div>
+          <div class="track-card-actions">
+            <button class="track-mini-action" data-track-playlist="${esc(track.id)}" title="Add or remove from playlists" aria-label="Add or remove from playlists" type="button">${icons.plus}</button>
+            ${playlist ? `<button class="track-mini-action danger" data-track-remove-playlist="${esc(track.id)}" title="Remove from this playlist" aria-label="Remove from this playlist" type="button">${icons.x}</button>` : ""}
+          </div>
         </div>
         <div class="card-copy">
           <div class="card-title">${esc(trackTitle(track))}</div>

@@ -19,7 +19,7 @@ export function showCtx(x, y, trackId) {
     <button class="ctx-item" data-ctx="play">${icons.play_overlay}<span>Play</span></button>
     <button class="ctx-item" data-ctx="next">${icons["skip-forward"]}<span>Play Next</span></button>
     <button class="ctx-item" data-ctx="queue">${icons.queue}<span>Add to Queue</span></button>
-    <button class="ctx-item" data-ctx="playlist">${icons.plus}<span>Add to Playlist</span></button>
+    <button class="ctx-item" data-ctx="playlist">${icons.plus}<span>Add / Remove Playlists</span></button>
     ${canRemove ? `<button class="ctx-item" data-ctx="remove-playlist">${icons.x}<span>Remove from Playlist</span></button>` : ""}
     <button class="ctx-item" data-ctx="metadata">${icons.album}<span>Refresh Metadata</span></button>
     <button class="ctx-item" data-ctx="copy">${icons.copy}<span>Copy Title</span></button>`;

@@ -21,6 +21,7 @@
   --radius:      13.48px;
   --radius-pill: 25.96px;
   --tr:          150ms cubic-bezier(0.2, 0, 0, 1);
+  --spring:      360ms cubic-bezier(0.34, 1.56, 0.64, 1);
   --font-stack:  system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 }
 
@@ -96,6 +97,55 @@ svg { width: 17.64px; height: 17.64px; fill: currentColor; }
   flex: 1;
   overflow: hidden;
 }
+.sidebar-main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+.sidebar-add-folder {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  margin: auto 0 13.48px;
+  width: 100%;
+  padding: 9.32px 12px;
+  border-radius: 12px;
+  color: #fff;
+  font-weight: 700;
+  background:
+    linear-gradient(135deg, rgba(255,255,255,0.18), rgba(255,255,255,0.06)) padding-box,
+    linear-gradient(135deg, rgba(255,255,255,0.45), rgba(250,35,59,0.65), rgba(95,185,255,0.45)) border-box;
+  border: 1px solid transparent;
+  box-shadow: 0 12px 28px rgba(0,0,0,0.24), inset 0 1px 0 rgba(255,255,255,0.28);
+  backdrop-filter: blur(22px) saturate(170%);
+  -webkit-backdrop-filter: blur(22px) saturate(170%);
+  transition: transform var(--spring), filter var(--tr), box-shadow var(--tr);
+}
+.sidebar-add-folder:hover {
+  filter: brightness(1.08);
+  transform: translateY(-2px);
+  box-shadow: 0 16px 36px rgba(0,0,0,0.32), inset 0 1px 0 rgba(255,255,255,0.36);
+}
+
+/* ── Liquid Glass Portal ────────────────────────────────────────────────────
+   The glass effect is rendered in a fixed-position React portal (#liquid-glass-portal)
+   that sits BEHIND the pill content. The library positions everything via
+   top/left/transform inline styles — CSS on parent elements has no effect on it.
+   To customise the effect, edit public/react/liquid-glass-islands.jsx and
+   run `npm run build:glass`.
+   ─────────────────────────────────────────────────────────────────────────── */
+#liquid-glass-portal {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 999;
+}
+/* The library injects divs with class 'glass' for the backdrop filter layer */
+#liquid-glass-portal .glass {
+  /* box-shadow etc. from library is fine; we let it manage itself */
+}
 
 /* Search Box */
 .search-box {
@@ -118,6 +168,19 @@ svg { width: 17.64px; height: 17.64px; fill: currentColor; }
 
 /* Navigation Sections */
 .nav-section { margin-top: 25.96px; }
+.playlist-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.playlist-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: 13.6px;
+}
 .section-title {
   color: var(--text-sub);
   font-size: 16px;
@@ -136,10 +199,14 @@ svg { width: 17.64px; height: 17.64px; fill: currentColor; }
   border-radius: var(--radius-sm);
   color: var(--text-base);
   font-weight: 500;
-  transition: background var(--tr), color var(--tr);
+  position: relative;
+  transition: background var(--tr), color var(--tr), transform var(--spring), box-shadow var(--tr);
 }
-.nav-item:hover { background: var(--bg-hover); }
-.nav-item.is-active { background: var(--bg-hover); }
+.nav-item:hover { background: var(--bg-hover); transform: translateY(-1px); }
+.nav-item.is-active {
+  background: linear-gradient(135deg, rgba(255,255,255,0.16), rgba(255,255,255,0.05));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.12);
+}
 .nav-item.is-active .nav-icon { color: var(--accent); }
 
 .nav-icon { color: var(--text-base); display: flex; align-items: center; justify-content: center; }
@@ -150,6 +217,27 @@ svg { width: 17.64px; height: 17.64px; fill: currentColor; }
 
 .playlist-scroll { flex: 1; overflow-y: auto; margin-top: 5.16px; }
 .playlist-scroll .nav-item { font-weight: 400; padding-left: 30.12px; }
+.playlist-inline-actions {
+  display: flex;
+  margin-left: auto;
+  gap: 4px;
+  opacity: 0;
+  transform: translateX(4px);
+  transition: opacity var(--tr), transform var(--tr);
+}
+.nav-item:hover .playlist-inline-actions,
+.nav-item:focus-within .playlist-inline-actions { opacity: 1; transform: translateX(0); }
+.playlist-mini-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  color: rgba(255,255,255,0.72);
+}
+.playlist-mini-action:hover { background: rgba(255,255,255,0.16); color: #fff; }
+.playlist-mini-action svg { width: 13px; height: 13px; }
 
 /* ── Main Content Area (Grid) ───────────────────────────────────────────── */
 .main-view {
@@ -204,10 +292,27 @@ svg { width: 17.64px; height: 17.64px; fill: currentColor; }
   cursor: pointer;
   group: card;
   min-width: 0;
+  position: relative;
+  transition: transform var(--spring), filter var(--tr);
 }
+.grid-card:hover { transform: translateY(-3px); }
 .grid-card:hover .card-art img { filter: brightness(0.8); }
 .grid-card:hover .card-play { opacity: 1; transform: translate(-50%, -50%) scale(1); }
 .grid-card.is-active .card-title { color: var(--accent); }
+.grid-card.is-active,
+.grid-card.is-playing {
+  padding: 10px;
+  margin: -10px;
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at 18% 0%, rgba(255,255,255,0.22), transparent 34%),
+    linear-gradient(135deg, rgba(250,35,59,0.32), rgba(255,179,64,0.15), rgba(64,156,255,0.24));
+  background-size: 220% 220%;
+  box-shadow: 0 18px 44px rgba(0,0,0,0.32), inset 0 1px 0 rgba(255,255,255,0.16);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  animation: playingGlow 4s ease-in-out infinite;
+}
 .grid-card.is-selected:not(.is-active) .card-art { outline: 3.08px solid rgba(255,255,255,0.18); outline-offset: 3.08px; }
 .card-art {
   width: 100%;
@@ -239,6 +344,58 @@ svg { width: 17.64px; height: 17.64px; fill: currentColor; }
   transition: opacity var(--tr), transform var(--tr);
 }
 .card-play svg { width: 17.64px; height: 17.64px; }
+.track-card-actions {
+  position: absolute;
+  isolation: isolate;
+  overflow: hidden;
+  right: 8px;
+  top: 8px;
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity var(--tr), transform var(--tr);
+}
+.grid-card:hover .track-card-actions,
+.grid-card:focus-within .track-card-actions { opacity: 1; transform: translateY(0); }
+.track-mini-action,
+.card-glass-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(24,24,26,0.54);
+  border: 1px solid rgba(255,255,255,0.18);
+  backdrop-filter: blur(16px) saturate(170%);
+  -webkit-backdrop-filter: blur(16px) saturate(170%);
+  box-shadow: 0 8px 18px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.16);
+  transition: transform var(--spring), background var(--tr), color var(--tr);
+}
+.track-mini-action:hover,
+.card-glass-action:hover { transform: scale(1.08); background: rgba(255,255,255,0.18); }
+.track-mini-action.danger:hover,
+.card-glass-action.danger:hover { background: rgba(255,69,58,0.72); }
+.track-mini-action svg { width: 15px; height: 15px; }
+.playlist-card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity var(--tr), transform var(--tr);
+}
+.grid-card:hover .playlist-card-actions,
+.grid-card:focus-within .playlist-card-actions { opacity: 1; transform: translateY(0); }
+.card-glass-action {
+  min-width: 0;
+  height: 30px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 700;
+}
 
 .card-title {
   font-size: 14.52px;
@@ -311,7 +468,13 @@ svg { width: 17.64px; height: 17.64px; fill: currentColor; }
 }
 .grid-container.is-list .grid-card:hover,
 .grid-container.is-list .grid-card.is-selected { background: rgba(255,255,255,0.06); }
-.grid-container.is-list .grid-card.is-active { background: rgba(250,35,59,0.14); }
+.grid-container.is-list .grid-card.is-active,
+.grid-container.is-list .grid-card.is-playing {
+  margin: 0;
+  padding: 9.32px 11.4px;
+  background:
+    linear-gradient(90deg, rgba(250,35,59,0.25), rgba(255,255,255,0.08), rgba(80,160,255,0.15));
+}
 .grid-container.is-list .card-art {
   width: 42.6px;
   height: 42.6px;
@@ -367,6 +530,8 @@ svg { width: 17.64px; height: 17.64px; fill: currentColor; }
   --right-width: 0.6;
 
   position: absolute;
+  isolation: isolate;
+  overflow: hidden;
   bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
@@ -385,18 +550,17 @@ svg { width: 17.64px; height: 17.64px; fill: currentColor; }
   z-index: 1000;
 }
 
-.pill-left { display: flex; align-items: center; gap: 12px; flex: var(--left-width) 1 0; min-width: 0; }
-.pill-center { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: var(--center-width) 1 0; min-width: 0; position: relative; gap: 10px; }
-.pill-right { display: flex; align-items: center; justify-content: flex-end; gap: 14px; flex: var(--right-width) 1 0; min-width: 0; }
+.pill-left { display: flex; align-items: center; gap: 12px; flex: var(--left-width) 1 0; min-width: 0; position: relative; z-index: 2; }
+.pill-center { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: var(--center-width) 1 0; min-width: 0; position: relative; z-index: 2; gap: 10px; }
+.pill-right { display: flex; align-items: center; justify-content: flex-end; gap: 14px; flex: var(--right-width) 1 0; min-width: 0; position: relative; z-index: 2; }
 .transport-controls { display: flex; align-items: center; justify-content: center; gap: 20px; }
 
 /* Buttons */
 .icon-btn {
   display: flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; border-radius: 4px;
-  color: var(--text-sub);ś
-  transition: color var(--tr); 
-  background var(--tr);
+  color: var(--text-sub);
+  transition: color var(--tr), background var(--tr), transform var(--spring), box-shadow var(--tr);
 }
 .icon-btn:hover { color: var(--text-base); }
 .icon-btn.is-active { color: var(--accent); }
@@ -937,5 +1101,239 @@ svg { width: 17.64px; height: 17.64px; fill: currentColor; }
   align-items: center;
   justify-content: center;
   gap: 6px;
+}
+
+/* Requested liquid-glass refinements */
+@keyframes playingGlow {
+  0%, 100% { filter: saturate(1); background-position: 0% 50%; }
+  50% { filter: saturate(1.25); background-position: 100% 50%; }
+}
+
+.icon-btn {
+  color: var(--text-sub);
+  border-radius: 8px;
+  transition: color var(--tr), background var(--tr), transform var(--spring), box-shadow var(--tr);
+}
+.icon-btn:hover {
+  color: var(--text-base);
+  transform: translateY(-1px) scale(1.05);
+  background: rgba(255,255,255,0.12);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.12);
+}
+
+.player-pill {
+  /* Background is transparent here — the #liquid-glass-portal React overlay
+     provides the actual glass effect behind the pill content.
+     backdrop-filter still applies to the pill's content for the frosted look. */
+  background: transparent;
+  backdrop-filter: blur(34px) saturate(190%);
+  -webkit-backdrop-filter: blur(34px) saturate(190%);
+  box-shadow: 0 18px 54px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.16);
+}
+.queue-panel,
+.context-menu {
+  background:
+    linear-gradient(135deg, rgba(255,255,255,0.12), rgba(255,255,255,0.04)),
+    rgba(34,34,38,0.72);
+  backdrop-filter: blur(34px) saturate(190%);
+  -webkit-backdrop-filter: blur(34px) saturate(190%);
+  box-shadow: 0 18px 54px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.16);
+}
+.context-menu.is-open { animation: liquidIn 220ms ease both; }
+
+.import-sheet-inner {
+  background: rgba(30,30,32,0.74);
+  border: 1px solid rgba(255,255,255,0.16);
+  box-shadow: 0 22px 48px rgba(0,0,0,0.52), inset 0 1px 0 rgba(255,255,255,0.12);
+  backdrop-filter: blur(34px) saturate(180%);
+  -webkit-backdrop-filter: blur(34px) saturate(180%);
+  animation: liquidIn var(--spring);
+}
+.sheet-copy { color: var(--text-sub); }
+.import-row { display: flex; gap: 9.4px; }
+.header-length { justify-content: flex-end; }
+
+.playlist-picker {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0,0,0,0.42);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.playlist-picker-glass {
+  width: min(480px, calc(100vw - 32px));
+  max-height: min(720px, calc(100vh - 48px));
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  border-radius: 24px;
+  padding: 22px;
+  color: var(--text-base);
+  background:
+    linear-gradient(135deg, rgba(255,255,255,0.16), rgba(255,255,255,0.05)),
+    rgba(24,24,28,0.78);
+  border: 1px solid rgba(255,255,255,0.16);
+  box-shadow: 0 26px 70px rgba(0,0,0,0.58), inset 0 1px 0 rgba(255,255,255,0.18);
+  backdrop-filter: blur(46px) saturate(210%);
+  -webkit-backdrop-filter: blur(46px) saturate(210%);
+  animation: liquidIn var(--spring);
+}
+.picker-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+.picker-header h2 { font-size: 20px; font-weight: 750; }
+.picker-header p { margin-top: 4px; color: var(--text-sub); }
+.picker-track {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.picker-track img {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: var(--bg-card);
+}
+.picker-track span { min-width: 0; display: flex; flex-direction: column; }
+.picker-track strong,
+.picker-track small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.picker-track small { color: var(--text-sub); }
+.picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  min-height: 80px;
+  padding-right: 4px;
+}
+.picker-empty {
+  padding: 22px;
+  text-align: center;
+  color: var(--text-sub);
+}
+.picker-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 12px;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.07);
+  cursor: pointer;
+  transition: transform var(--spring), background var(--tr), border-color var(--tr);
+}
+.picker-row:hover { transform: translateY(-1px); background: rgba(255,255,255,0.1); }
+.picker-row input { position: absolute; opacity: 0; pointer-events: none; }
+.picker-check {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.28);
+  background: rgba(255,255,255,0.05);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.1);
+}
+.picker-row input:checked + .picker-check {
+  background: radial-gradient(circle at 50% 50%, #fff 0 28%, transparent 30%), var(--accent);
+  border-color: transparent;
+}
+.picker-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
+.picker-count { color: var(--text-sub); }
+.picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.glass-btn {
+  padding: 9px 14px;
+  border-radius: 999px;
+  color: var(--text-base);
+  font-weight: 700;
+  background: rgba(255,255,255,0.09);
+  border: 1px solid rgba(255,255,255,0.12);
+  transition: transform var(--spring), background var(--tr);
+}
+.glass-btn:hover { transform: translateY(-1px); background: rgba(255,255,255,0.15); }
+.glass-btn-primary {
+  background: linear-gradient(135deg, var(--accent), #ff7b54);
+  border-color: rgba(255,255,255,0.18);
+}
+.glass-btn-primary.danger {
+  background: linear-gradient(135deg, #ff453a, #ff7b54);
+}
+
+.glass-dialog-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0,0,0,0.42);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  opacity: 0;
+  transition: opacity 180ms ease;
+}
+.glass-dialog-layer.is-open { opacity: 1; }
+.glass-dialog {
+  width: min(390px, calc(100vw - 32px));
+  border-radius: 22px;
+  padding: 22px;
+  background:
+    linear-gradient(135deg, rgba(255,255,255,0.16), rgba(255,255,255,0.05)),
+    rgba(24,24,28,0.82);
+  border: 1px solid rgba(255,255,255,0.16);
+  box-shadow: 0 26px 70px rgba(0,0,0,0.58), inset 0 1px 0 rgba(255,255,255,0.18);
+  backdrop-filter: blur(46px) saturate(210%);
+  -webkit-backdrop-filter: blur(46px) saturate(210%);
+  animation: liquidIn var(--spring);
+}
+.glass-dialog h2 { font-size: 19px; margin-bottom: 14px; }
+.glass-dialog-copy { color: var(--text-sub); }
+.glass-dialog-input {
+  width: 100%;
+  color: var(--text-base);
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.16);
+  border-radius: 12px;
+  padding: 11px 12px;
+  outline: none;
+}
+.glass-dialog-input:focus { border-color: rgba(255,255,255,0.36); }
+.glass-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+@media (max-width: 749.8px) {
+  .sidebar-add-folder {
+    font-size: 11px;
+    padding: 8px 4px;
+    white-space: normal;
+  }
+  .playlist-inline-actions { display: none; }
+  .track-card-actions { opacity: 1; transform: none; }
 }
 

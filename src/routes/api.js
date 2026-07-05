@@ -78,6 +78,18 @@ router.post('/playlists', asyncHandler((req, res) => {
   res.status(201).json({ playlist, playlists: db.getAllPlaylists() });
 }));
 
+router.patch('/playlists/:id', asyncHandler((req, res) => {
+  const playlistId = routeId(req.params.id, 'Playlist id');
+  const playlist = db.updatePlaylistName(playlistId, playlistName(req.body?.name));
+  res.json({ playlist, playlists: db.getAllPlaylists() });
+}));
+
+router.delete('/playlists/:id', asyncHandler((req, res) => {
+  const playlistId = routeId(req.params.id, 'Playlist id');
+  db.deletePlaylist(playlistId);
+  res.json({ playlists: db.getAllPlaylists() });
+}));
+
 router.post('/playlists/:id/tracks', asyncHandler((req, res) => {
   const playlistId = routeId(req.params.id, 'Playlist id');
   const trackId = routeId(req.body?.trackId, 'Track id');

@@ -31,8 +31,6 @@ npm start
 Useful backend tuning knobs:
 
 ```powershell
-$env:PORT="1111"
-$env:HOST="127.0.0.1"
 $env:SCAN_CONCURRENCY="8"
 $env:TRANSCODE_CONCURRENCY="4"
 $env:MAX_SCAN_FILES="100000"

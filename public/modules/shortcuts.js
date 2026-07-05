@@ -7,6 +7,7 @@ import { closeImportSheet, openImportSheet } from "./import-lib.js";
 import { updateVolumeUI } from "./audio.js";
 import { renderTransport, renderQueue } from "./render.js";
 import { closeCtx } from "./context-menu.js";
+import { closePlaylistPicker } from "./playlists.js";
 
 const SHORTCUTS = [
   {
@@ -133,6 +134,10 @@ document.addEventListener("keydown", event => {
   if (event.key === "Escape") {
     if (isOpen) {
       closeShortcuts();
+      return;
+    }
+    if (!el.playlistPicker.classList.contains("is-hidden")) {
+      closePlaylistPicker();
       return;
     }
     if (!el.importSheet.classList.contains("is-hidden")) {

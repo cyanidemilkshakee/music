@@ -60,8 +60,15 @@ export const el = {
   queueCount:       document.querySelector("#queueCount"),
   queueClearButton: document.querySelector("#queueClearButton"),
   queueCloseButton: document.querySelector("#queueCloseButton"),
+  playerPlaylistButton: document.querySelector("#playerPlaylistButton"),
 
   // Misc
   contextMenu: document.querySelector("#contextMenu"),
+  playlistPicker: document.querySelector("#playlistPicker"),
+  playlistPickerTrack: document.querySelector("#playlistPickerTrack"),
+  playlistPickerList: document.querySelector("#playlistPickerList"),
+  playlistPickerClose: document.querySelector("#playlistPickerClose"),
+  playlistPickerDone: document.querySelector("#playlistPickerDone"),
+  playlistPickerNew: document.querySelector("#playlistPickerNew"),
   audio:       document.querySelector("#audio")
 };

@@ -9,18 +9,9 @@ const database = require('./services/db');
 
 const app = express();
 
-const DEFAULT_PORT = 1111;
-const DEFAULT_HOST = '127.0.0.1';
+const PORT = 1111;
+const HOST = '127.0.0.1';
 const isProduction = process.env.NODE_ENV === 'production';
-
-function parsePort(value) {
-  if (value === undefined || value === '') return DEFAULT_PORT;
-  const port = Number(value);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`Invalid PORT value: ${value}`);
-  }
-  return port;
-}
 
 function parsePositiveInteger(value, fallback) {
   if (value === undefined || value === '') return fallback;
@@ -28,8 +19,6 @@ function parsePositiveInteger(value, fallback) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-const PORT = parsePort(process.env.PORT);
-const HOST = process.env.HOST || DEFAULT_HOST;
 const REQUEST_TIMEOUT_MS = parsePositiveInteger(process.env.REQUEST_TIMEOUT_MS, 2 * 60 * 1000);
 const JSON_LIMIT = process.env.JSON_LIMIT || '2mb';
 

@@ -28,15 +28,24 @@ import { updateVolumeUI } from "./modules/audio.js";
 import { openImportSheet, closeImportSheet, doImport } from "./modules/import-lib.js";
 import {
   addToPlaylist,
+  closePlaylistPicker,
+  createPlaylistFromPicker,
+  deletePlaylist,
+  openPlaylistPicker,
   removeFromActivePlaylist,
+  renamePlaylist,
   refreshTrackMetadata,
+  savePlaylistPicker,
   createPlaylistFromButton,
   showActionError
 } from "./modules/playlists.js";
 import { showCtx, closeCtx, getCtxTrackId } from "./modules/context-menu.js";
 import { trackTitle } from "./modules/utils.js";
 import { getStorage, setStorage } from "./modules/storage.js";
+import { mountLiquidGlassIslands } from "./generated/liquid-glass-islands.js";
 import "./modules/shortcuts.js";
+
+let lastTrackClick = { id: null, at: 0 };
 
 function reportAppError(error, fallback = "Something went wrong.") {
   const message = error?.message || fallback;
@@ -94,6 +103,7 @@ async function loadState() {
 }
 
 hydrateIcons();
+mountLiquidGlassIslands();
 loadState().catch(error => {
   reportAppError(error, "Failed to load the library.");
   toggleEmptyState();
@@ -103,6 +113,38 @@ loadState().catch(error => {
 document.addEventListener("click", event => {
   try {
     if (!el.contextMenu.contains(event.target)) closeCtx();
+
+    const playlistRename = event.target.closest("[data-playlist-rename]");
+    if (playlistRename) {
+      event.preventDefault();
+      event.stopPropagation();
+      renamePlaylist(playlistRename.dataset.playlistRename).catch(showActionError);
+      return;
+    }
+
+    const playlistDelete = event.target.closest("[data-playlist-delete]");
+    if (playlistDelete) {
+      event.preventDefault();
+      event.stopPropagation();
+      deletePlaylist(playlistDelete.dataset.playlistDelete).catch(showActionError);
+      return;
+    }
+
+    const trackPlaylist = event.target.closest("[data-track-playlist]");
+    if (trackPlaylist) {
+      event.preventDefault();
+      event.stopPropagation();
+      openPlaylistPicker(trackPlaylist.dataset.trackPlaylist);
+      return;
+    }
+
+    const trackRemovePlaylist = event.target.closest("[data-track-remove-playlist]");
+    if (trackRemovePlaylist) {
+      event.preventDefault();
+      event.stopPropagation();
+      removeFromActivePlaylist(trackRemovePlaylist.dataset.trackRemovePlaylist).catch(showActionError);
+      return;
+    }
 
     const queueRemove = event.target.closest("[data-queue-remove]");
     if (queueRemove) {
@@ -164,6 +206,13 @@ document.addEventListener("click", event => {
         playTrack(trackId);
         return;
       }
+      const now = Date.now();
+      if (lastTrackClick.id === trackId && now - lastTrackClick.at < 420) {
+        lastTrackClick = { id: null, at: 0 };
+        playTrack(trackId);
+        return;
+      }
+      lastTrackClick = { id: trackId, at: now };
       state.selectedTrackId = trackId;
       renderGrid();
       return;
@@ -186,7 +235,7 @@ document.addEventListener("click", event => {
       if (action === "play") playTrack(track.id);
       else if (action === "next") queueTrack(track.id, "next");
       else if (action === "queue") queueTrack(track.id, "end");
-      else if (action === "playlist") addToPlaylist(track).catch(showActionError);
+      else if (action === "playlist") openPlaylistPicker(track.id);
       else if (action === "remove-playlist") removeFromActivePlaylist(track.id).catch(showActionError);
       else if (action === "metadata") refreshTrackMetadata(track.id).catch(showActionError);
       else if (action === "copy") {
@@ -217,7 +266,9 @@ document.addEventListener("contextmenu", event => {
 
 document.addEventListener("dblclick", event => {
   const card = event.target.closest(".grid-card[data-track-id]");
-  if (card) {
+  if (card && !event.target.closest("[data-track-playlist], [data-track-remove-playlist], [data-play-btn]")) {
+    event.preventDefault();
+    event.stopPropagation();
     playTrack(card.dataset.trackId);
     return;
   }
@@ -231,7 +282,7 @@ document.addEventListener("dblclick", event => {
       playTrack(ids[0], ids, 0);
     }
   }
-});
+}, true);
 
 el.playButton.addEventListener("click", playPause);
 el.nextButton.addEventListener("click", nextTrack);
@@ -276,6 +327,20 @@ el.queueCloseButton?.addEventListener("click", event => {
   event.stopPropagation();
   state.queueOpen = false;
   renderQueue();
+});
+
+el.playerPlaylistButton?.addEventListener("click", event => {
+  event.stopPropagation();
+  const track = state.tracks.find(item => item.id === state.currentTrackId)
+    || state.tracks.find(item => item.id === state.selectedTrackId);
+  if (track) openPlaylistPicker(track.id);
+});
+
+el.playlistPickerClose?.addEventListener("click", closePlaylistPicker);
+el.playlistPickerDone?.addEventListener("click", () => savePlaylistPicker().catch(showActionError));
+el.playlistPickerNew?.addEventListener("click", () => createPlaylistFromPicker().catch(showActionError));
+el.playlistPicker?.addEventListener("click", event => {
+  if (event.target === el.playlistPicker) closePlaylistPicker();
 });
 
 el.backButton?.addEventListener("click", goBack);
