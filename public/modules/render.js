@@ -183,6 +183,8 @@ export function renderNowPlaying() {
     el.trackTitle.textContent  = "Not Playing";
     el.trackArtist.textContent = "Local Amp";
     el.coverImage.src = DEFAULT_COVER;
+    el.codecDisplay.textContent = "";
+    el.bitrateDisplay.textContent = "";
     // Pill is always visible.
     return;
   }
@@ -193,6 +195,9 @@ export function renderNowPlaying() {
     el.coverImage.onerror = null;
     el.coverImage.src = DEFAULT_COVER;
   };
+
+  el.codecDisplay.textContent = track.codec ? track.codec : (track.format || '');
+  el.bitrateDisplay.textContent = track.bitRate ? `${Math.round(track.bitRate / 1000)} kbps` : '';
 }
 
 // ── Transport Controls ──────────────────────────────────────────────────────

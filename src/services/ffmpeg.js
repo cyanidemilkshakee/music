@@ -126,14 +126,21 @@ async function removeIfExists(filePath) {
   await fs.promises.rm(filePath, { force: true }).catch(() => {});
 }
 
+async function isUsableCacheFile(filePath) {
+  const stat = await fs.promises.stat(filePath).catch(() => null);
+  return Boolean(stat && stat.isFile() && stat.size > 0);
+}
+
 async function ensureDecoded(track) {
   const outputPath = cachePathForTrack(track);
-  if (fs.existsSync(outputPath)) {
+  if (await isUsableCacheFile(outputPath)) {
     return outputPath;
   }
+  await removeIfExists(outputPath);
 
   return transcodeQueue.run(async () => {
-    if (fs.existsSync(outputPath)) return outputPath;
+    if (await isUsableCacheFile(outputPath)) return outputPath;
+    await removeIfExists(outputPath);
 
     await fs.promises.access(track.path, fs.constants.R_OK);
     const tempPath = outputPath.replace(/\.mp3$/i, `.${process.pid}.${Date.now()}.tmp.mp3`);
@@ -146,6 +153,9 @@ async function ensureDecoded(track) {
         error.message = commandFailureMessage(FFMPEG_PATH, error);
         throw error;
       });
+      if (!await isUsableCacheFile(tempPath)) {
+        throw new Error('Transcoded audio cache was empty.');
+      }
       await fs.promises.rename(tempPath, outputPath);
       return outputPath;
     } catch (error) {

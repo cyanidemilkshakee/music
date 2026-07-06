@@ -9,8 +9,6 @@ const db = require('../services/db');
 const { ensureDecoded, cachePathForTrack, FFMPEG_PATH, commandFailureMessage, trimOutput } = require('../services/ffmpeg');
 const { asyncHandler, httpError, routeId } = require('../utils/http');
 
-const LOW_LATENCY_STREAMING = process.env.LOW_LATENCY_STREAMING !== 'false';
-
 function hash(value) {
   return crypto.createHash('sha1').update(String(value)).digest('hex');
 }
@@ -46,6 +44,8 @@ function pipeFileToResponse(filePath, res, options = {}) {
 
 function parseRangeHeader(rangeHeader, size) {
   if (!rangeHeader) return null;
+  if (!Number.isSafeInteger(size) || size <= 0) throw httpError(416, 'Range not satisfiable.');
+
   const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
   if (!match) throw httpError(416, 'Invalid range.');
 
@@ -77,16 +77,6 @@ function parseRangeHeader(rangeHeader, size) {
 router.post('/decode/:id', asyncHandler(async (req, res) => {
   const id = routeId(req.params.id, 'Track id');
   const track = getTrackOrThrow(id);
-
-  const cachedPath = cachePathForTrack(track);
-  if (LOW_LATENCY_STREAMING && !fs.existsSync(cachedPath)) {
-    res.json({
-      id: track.id,
-      audioUrl: `/api/stream/${encodeURIComponent(track.id)}?v=${trackVersion(track)}`,
-      streaming: true
-    });
-    return;
-  }
 
   const decodedPath = await ensureDecoded(track);
   res.json({
@@ -153,22 +143,35 @@ router.get('/audio/:id', asyncHandler(async (req, res) => {
   const stat = await fs.promises.stat(decodedPath).catch(error => {
     throw httpError(404, 'Audio cache not found.', { detail: error.message });
   });
+  if (!stat.isFile() || stat.size <= 0) {
+    throw httpError(404, 'Audio cache is not ready.');
+  }
 
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Type', 'audio/mpeg');
+  res.setHeader('Content-Length', stat.size);
   res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.setHeader('ETag', `"${trackVersion(track)}"`);
 
   let range;
   try {
     range = parseRangeHeader(req.headers.range, stat.size);
   } catch (error) {
-    res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+    res.writeHead(416, {
+      'Accept-Ranges': 'bytes',
+      'Content-Range': `bytes */${stat.size}`,
+      'Content-Length': '0'
+    });
     res.end();
     return;
   }
 
   if (!range) {
-    res.writeHead(200, { 'Content-Length': stat.size });
+    res.writeHead(200);
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
     pipeFileToResponse(decodedPath, res);
     return;
   }
@@ -177,6 +180,10 @@ router.get('/audio/:id', asyncHandler(async (req, res) => {
     'Content-Range': `bytes ${range.start}-${range.end}/${stat.size}`,
     'Content-Length': range.end - range.start + 1
   });
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
   pipeFileToResponse(decodedPath, res, range);
 }));
 

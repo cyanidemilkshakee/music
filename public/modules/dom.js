@@ -41,6 +41,8 @@ export const el = {
   repeatButton:  document.querySelector("#repeatButton"),
   moreButton:    document.querySelector("#moreButton"),
   queueButton:   document.querySelector("#queueButton"),
+  codecDisplay:  document.querySelector("#codecDisplay"),
+  bitrateDisplay:document.querySelector("#bitrateDisplay"),
 
   // Scrubber
   currentTime:      document.querySelector("#currentTime"),

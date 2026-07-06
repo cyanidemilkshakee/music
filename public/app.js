@@ -27,7 +27,6 @@ import {
 import { updateVolumeUI } from "./modules/audio.js";
 import { openImportSheet, closeImportSheet, doImport } from "./modules/import-lib.js";
 import {
-  addToPlaylist,
   closePlaylistPicker,
   createPlaylistFromPicker,
   deletePlaylist,

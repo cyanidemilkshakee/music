@@ -77,7 +77,7 @@ function parseTrack(filePath, stat, probe) {
     trackNumber: parseNumber(firstTag(tags, ['track', 'tracknumber'], '')),
     discNumber: parseNumber(firstTag(tags, ['disc', 'discnumber'], '')),
     duration: finiteNumber(format.duration || audio.duration),
-    bitRate: finiteNumber(format.bit_rate || audio.bit_rate),
+    bitRate: finiteNumber(audio.bit_rate || format.bit_rate),
     sampleRate: audio.sample_rate ? finiteNumber(audio.sample_rate, null) : null,
     bitDepth: parseNumber(audio.bits_per_raw_sample || audio.bits_per_sample || tags.bits_per_raw_sample || tags.bits_per_sample),
     channels: audio.channels || null,
