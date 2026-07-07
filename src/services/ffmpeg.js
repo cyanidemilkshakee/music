@@ -135,6 +135,29 @@ async function isUsableCacheFile(filePath) {
   return Boolean(stat && stat.isFile() && stat.size > 0);
 }
 
+async function clearAudioCache() {
+  const entries = await fs.promises.readdir(CACHE_DIR, { withFileTypes: true }).catch(error => {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  });
+  let removed = 0;
+  let bytes = 0;
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !/\.(mp3|tmp\.mp3)$/i.test(entry.name)) continue;
+    const filePath = path.join(CACHE_DIR, entry.name);
+    const resolved = path.resolve(filePath);
+    if (path.dirname(resolved) !== path.resolve(CACHE_DIR)) continue;
+
+    const stat = await fs.promises.stat(resolved).catch(() => null);
+    await fs.promises.rm(resolved, { force: true }).catch(() => {});
+    removed++;
+    bytes += stat?.size || 0;
+  }
+
+  return { removed, bytes };
+}
+
 async function ensureDecoded(track) {
   const outputPath = cachePathForTrack(track);
   const outputDir = path.dirname(outputPath);
@@ -196,6 +219,7 @@ module.exports = {
   FFPROBE_PATH,
   cachePathForTrack,
   commandFailureMessage,
+  clearAudioCache,
   ensureDecoded,
   probeTrackMetadata,
   runFile,

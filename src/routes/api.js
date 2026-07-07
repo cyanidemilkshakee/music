@@ -4,7 +4,7 @@ const router = express.Router();
 
 const db = require('../services/db');
 const { scanDirectory, extractSingleTrackMetadata } = require('../services/scanner');
-const { runFile, FFMPEG_PATH, FFPROBE_PATH } = require('../services/ffmpeg');
+const { clearAudioCache, runFile, FFMPEG_PATH, FFPROBE_PATH } = require('../services/ffmpeg');
 const { asyncHandler, optionalString, requireString, routeId } = require('../utils/http');
 
 function playlistName(value) {
@@ -44,6 +44,11 @@ router.get('/state', asyncHandler((req, res) => {
 
 router.get('/stats', asyncHandler((req, res) => {
   res.json(db.getStats());
+}));
+
+router.post('/cache/clear', asyncHandler(async (req, res) => {
+  const result = await clearAudioCache();
+  res.json(result);
 }));
 
 router.get('/recent', asyncHandler((req, res) => {

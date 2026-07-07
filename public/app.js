@@ -65,6 +65,19 @@ function arrayOrEmpty(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB"];
+  let next = value / 1024;
+  let unit = units.shift();
+  while (next >= 1024 && units.length) {
+    next /= 1024;
+    unit = units.shift();
+  }
+  return `${next.toFixed(next >= 10 ? 1 : 2)} ${unit}`;
+}
+
 function syncLibraryFromServer(data) {
   state.tracks = arrayOrEmpty(data.tracks);
   state.playlists = arrayOrEmpty(data.playlists);
@@ -100,6 +113,26 @@ async function loadState() {
 
   el.audio.volume = storedVolume();
   updateVolumeUI();
+}
+
+async function clearCache() {
+  const button = el.clearCacheButton;
+  if (!button || button.disabled) return;
+
+  const previousText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Clearing...";
+
+  try {
+    const result = await api("/api/cache/clear", { method: "POST", timeoutMs: 60_000 });
+    const removed = Number(result.removed) || 0;
+    showToast(`Cleared ${removed} cache file${removed === 1 ? "" : "s"} (${formatBytes(result.bytes)}).`, 3000);
+  } catch (error) {
+    reportAppError(error, "Failed to clear cache.");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
 }
 
 hydrateIcons();
@@ -374,6 +407,7 @@ el.layoutToggleButton.addEventListener("click", () => {
 
 el.importSmallButton.addEventListener("click", createPlaylistFromButton);
 el.importMainButton.addEventListener("click", openImportSheet);
+el.clearCacheButton?.addEventListener("click", clearCache);
 el.sidebarImportButton?.addEventListener("click", openImportSheet);
 el.importSheetClose.addEventListener("click", closeImportSheet);
 el.importButtonSheet.addEventListener("click", () => doImport(el.folderInputSheet.value.trim()));

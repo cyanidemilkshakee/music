@@ -26,6 +26,7 @@ export const el = {
   importStatusSheet:  document.querySelector("#importStatusSheet"),
   importSheetClose:   document.querySelector("#importSheetClose"),
   sidebarImportButton: document.querySelector("#sidebarImportButton"),
+  clearCacheButton: document.querySelector("#clearCacheButton"),
 
   // Player Pill
   playerPill:    document.querySelector("#playerPill"),

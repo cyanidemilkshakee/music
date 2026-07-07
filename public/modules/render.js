@@ -161,10 +161,10 @@ export function renderGrid() {
         <div class="card-art">
           <img src="${coverUrl(track)}" alt="" loading="lazy" onerror="this.onerror=null;this.src='${DEFAULT_COVER}'">
           <div class="card-play" data-play-btn="true">${icons.play_pause_morph}</div>
-          <div class="track-card-actions">
-            <button class="track-mini-action" data-track-playlist="${esc(track.id)}" title="Add or remove from playlists" aria-label="Add or remove from playlists" type="button">${icons.plus}</button>
-            ${playlist ? `<button class="track-mini-action danger" data-track-remove-playlist="${esc(track.id)}" title="Remove from this playlist" aria-label="Remove from this playlist" type="button">${icons.x}</button>` : ""}
-          </div>
+        </div>
+        <div class="track-card-actions">
+          <button class="track-mini-action" data-track-playlist="${esc(track.id)}" title="Add or remove from playlists" aria-label="Add or remove from playlists" type="button">${icons.plus}</button>
+          ${playlist ? `<button class="track-mini-action danger" data-track-remove-playlist="${esc(track.id)}" title="Remove from this playlist" aria-label="Remove from this playlist" type="button">${icons.x}</button>` : ""}
         </div>
         <div class="card-copy">
           <div class="card-title">${esc(trackTitle(track))}</div>
