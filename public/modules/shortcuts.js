@@ -14,10 +14,18 @@ const SHORTCUTS = [
     category: "Playback",
     items: [
       { keys: ["Space"], label: "Play / Pause" },
-      { keys: ["Right"], label: "Next track" },
-      { keys: ["Left"], label: "Previous track / Restart" },
+      { keys: ["N"], label: "Next track" },
+      { keys: ["P"], label: "Previous track / Restart" },
+      { keys: ["Up"], label: "Volume Up 5%" },
+      { keys: ["Down"], label: "Volume Down 5%" },
       { keys: ["M"], label: "Toggle mute" },
       { keys: ["R"], label: "Repeat: Off -> All -> One -> Off" },
+      { keys: ["Right"], label: "Seek forward 10s" },
+      { keys: ["Left"], label: "Seek backward 10s" },
+      { keys: ["Shift", "Right"], label: "Seek forward 5s" },
+      { keys: ["Shift", "Left"], label: "Seek backward 5s" },
+      { keys: ["Ctrl", "Right"], label: "Seek forward 60s" },
+      { keys: ["Ctrl", "Left"], label: "Seek backward 60s" },
       { keys: ["S"], label: "Toggle shuffle" }
     ]
   },
@@ -27,7 +35,6 @@ const SHORTCUTS = [
       { keys: ["H"], label: "Go to Home" },
       { keys: ["A"], label: "Go to Artists" },
       { keys: ["B"], label: "Go to Albums" },
-      { keys: ["P"], label: "Go to Playlists" },
       { keys: ["F", "/"], label: "Focus Search" }
     ]
   },
@@ -67,13 +74,15 @@ function buildOverlay() {
         ${SHORTCUTS.map(section => `
           <div class="shortcut-section">
             <div class="shortcut-category">${section.category}</div>
-            ${section.items.map(item => `
-              <div class="shortcut-row">
-                <div class="shortcut-keys">
-                  ${item.keys.map(key => `<kbd class="shortcut-kbd">${key}</kbd>`).join("<span class=\"shortcut-plus\">+</span>")}
-                </div>
-                <span class="shortcut-label">${item.label}</span>
-              </div>`).join("")}
+            <div class="shortcut-items">
+              ${section.items.map(item => `
+                <div class="shortcut-row">
+                  <div class="shortcut-keys">
+                    ${item.keys.map(key => `<kbd class="shortcut-kbd">${key}</kbd>`).join("<span class=\"shortcut-plus\">+</span>")}
+                  </div>
+                  <span class="shortcut-label">${item.label}</span>
+                </div>`).join("")}
+            </div>
           </div>`).join("")}
       </div>
       <div class="shortcut-footer">Press <kbd class="shortcut-kbd shortcut-kbd--sm">?</kbd> or <kbd class="shortcut-kbd shortcut-kbd--sm">Esc</kbd> to close</div>
@@ -153,7 +162,8 @@ document.addEventListener("keydown", event => {
     return;
   }
 
-  if (inInput || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (inInput || event.altKey) return;
+  if ((event.ctrlKey || event.metaKey) && !event.code.startsWith("Arrow")) return;
 
   switch (event.code) {
     case "Space":
@@ -165,12 +175,27 @@ document.addEventListener("keydown", event => {
       goBack();
       break;
     case "ArrowRight":
-      event.preventDefault();
-      nextTrack();
-      break;
     case "ArrowLeft":
       event.preventDefault();
-      prevTrack();
+      if (el.audio.duration) {
+        const dir = event.code === "ArrowRight" ? 1 : -1;
+        let amount = 10;
+        if (event.shiftKey) amount = 5;
+        else if (event.ctrlKey || event.metaKey) amount = 60;
+        el.audio.currentTime = Math.max(0, Math.min(el.audio.duration, el.audio.currentTime + (amount * dir)));
+      }
+      break;
+    case "ArrowUp":
+      event.preventDefault();
+      el.audio.volume = Math.min(1, Math.round((el.audio.volume + 0.05) * 100) / 100);
+      if (el.audio.muted) el.audio.muted = false;
+      updateVolumeUI();
+      break;
+    case "ArrowDown":
+      event.preventDefault();
+      el.audio.volume = Math.max(0, Math.round((el.audio.volume - 0.05) * 100) / 100);
+      if (el.audio.muted && el.audio.volume > 0) el.audio.muted = false;
+      updateVolumeUI();
       break;
     case "KeyM":
       event.preventDefault();
@@ -203,9 +228,13 @@ document.addEventListener("keydown", event => {
       event.preventDefault();
       setView("albums");
       break;
+    case "KeyN":
+      event.preventDefault();
+      nextTrack();
+      break;
     case "KeyP":
       event.preventDefault();
-      setView("playlists");
+      prevTrack();
       break;
     case "KeyQ":
       event.preventDefault();

@@ -287,10 +287,43 @@ function renderPlaylistPicker() {
   `).join("");
 }
 
-export function openPlaylistPicker(trackId) {
+export function openPlaylistPicker(trackId, event) {
   if (!state.tracks.some(track => track.id === trackId)) return;
   pickerTrackId = trackId;
   renderPlaylistPicker();
+  
+  if (event) {
+    const glass = el.playlistPicker.querySelector(".playlist-picker-glass");
+    const rect = (event.target.closest("button, .ctx-item") || event.target).getBoundingClientRect();
+    
+    const boxWidth = 375;
+    const boxHeight = 400; // rough estimate of max height
+    
+    // Default to positioning it above the clicked element, centered horizontally
+    let left = rect.left + rect.width / 2 - boxWidth / 2;
+    let bottom = window.innerHeight - rect.top + 15;
+    
+    // Clamp to screen bounds
+    if (left < 10) left = 10;
+    if (left + boxWidth > window.innerWidth - 10) left = window.innerWidth - boxWidth - 10;
+    
+    if (bottom < 10) bottom = 10;
+    if (bottom + boxHeight > window.innerHeight - 10) bottom = window.innerHeight - boxHeight - 10;
+    
+    glass.style.right = 'auto';
+    glass.style.left = `${left}px`;
+    glass.style.bottom = `${bottom}px`;
+    
+    // Position the arrow so it points directly at the click target
+    let arrowLeft = rect.left + rect.width / 2 - left - 6;
+    
+    // Clamp arrow so it doesn't fall off the rounded corners of the glass box
+    if (arrowLeft < 20) arrowLeft = 20;
+    if (arrowLeft > boxWidth - 32) arrowLeft = boxWidth - 32;
+    
+    glass.style.setProperty("--arrow-left", `${arrowLeft}px`);
+  }
+  
   el.playlistPicker.classList.remove("is-hidden");
   el.playlistPicker.setAttribute("aria-hidden", "false");
 }

@@ -133,7 +133,7 @@ document.addEventListener("click", event => {
     if (trackPlaylist) {
       event.preventDefault();
       event.stopPropagation();
-      openPlaylistPicker(trackPlaylist.dataset.trackPlaylist);
+      openPlaylistPicker(trackPlaylist.dataset.trackPlaylist, event);
       return;
     }
 
@@ -234,7 +234,7 @@ document.addEventListener("click", event => {
       if (action === "play") playTrack(track.id);
       else if (action === "next") queueTrack(track.id, "next");
       else if (action === "queue") queueTrack(track.id, "end");
-      else if (action === "playlist") openPlaylistPicker(track.id);
+      else if (action === "playlist") openPlaylistPicker(track.id, event);
       else if (action === "remove-playlist") removeFromActivePlaylist(track.id).catch(showActionError);
       else if (action === "metadata") refreshTrackMetadata(track.id).catch(showActionError);
       else if (action === "copy") {
@@ -332,7 +332,7 @@ el.playerPlaylistButton?.addEventListener("click", event => {
   event.stopPropagation();
   const track = state.tracks.find(item => item.id === state.currentTrackId)
     || state.tracks.find(item => item.id === state.selectedTrackId);
-  if (track) openPlaylistPicker(track.id);
+  if (track) openPlaylistPicker(track.id, event);
 });
 
 el.playlistPickerClose?.addEventListener("click", closePlaylistPicker);
