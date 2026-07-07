@@ -29,6 +29,60 @@ export function refreshQueueIndex() {
   state.queueIndex = state.queue.findIndex(id => id === state.currentTrackId);
 }
 
+function shuffleIds(ids) {
+  const next = [...ids];
+  for (let i = next.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [next[i], next[j]] = [next[j], next[i]];
+  }
+  return next;
+}
+
+function sameIdSet(left, right) {
+  if (left.length !== right.length) return false;
+  const rightSet = new Set(right);
+  return left.every(id => rightSet.has(id));
+}
+
+function reorderQueueForShuffle(currentId = state.currentTrackId) {
+  if (!state.queue.length) return;
+  refreshQueueIndex();
+
+  if (!currentId || state.queueIndex < 0) {
+    state.queue = shuffleIds(state.queue);
+    return;
+  }
+
+  const played = state.queue.slice(0, state.queueIndex + 1);
+  const upcoming = state.queue.slice(state.queueIndex + 1);
+  state.queue = [...played, ...shuffleIds(upcoming)];
+}
+
+function restoreQueueOrder(currentId = state.currentTrackId) {
+  if (!state.queue.length) return;
+  const ordered = contextQueue(currentId || state.selectedTrackId || state.queue[0]);
+  if (!sameIdSet(state.queue, ordered)) return;
+  state.queue = ordered;
+  refreshQueueIndex();
+}
+
+export function setShuffle(enabled) {
+  const next = Boolean(enabled);
+  if (state.shuffle === next) return;
+  state.shuffle = next;
+  if (state.shuffle) reorderQueueForShuffle();
+  else restoreQueueOrder();
+  renderTransport();
+  renderQueue();
+}
+
+export function cycleRepeat() {
+  const cycle = { none: "all", all: "one", one: "none" };
+  state.repeat = cycle[state.repeat] || "none";
+  renderTransport();
+  renderQueue();
+}
+
 export function queueTrack(trackId, placement = "end") {
   if (!state.tracks.some(track => track.id === trackId)) return;
   refreshQueueIndex();
@@ -101,11 +155,17 @@ export async function playTrack(trackId, queueIds = contextQueue(trackId), reque
   const requestId = ++playRequestId;
   activeDecodeController = new AbortController();
 
-  const nextQueue = queueIds.length ? [...queueIds] : [track.id];
+  const preservesQueueOrder = queueIds === state.queue;
+  let nextQueue = queueIds.length ? [...queueIds] : [track.id];
   if (!nextQueue.includes(track.id)) nextQueue.push(track.id);
   let nextIndex = Number.isInteger(requestedIndex) ? requestedIndex : nextQueue.indexOf(track.id);
   if (nextIndex < 0 || nextQueue[nextIndex] !== track.id) {
     nextIndex = Math.max(0, nextQueue.indexOf(track.id));
+  }
+  if (state.shuffle && !preservesQueueOrder && nextQueue.length > 1) {
+    const upcoming = nextQueue.filter(id => id !== track.id);
+    nextQueue = [track.id, ...shuffleIds(upcoming)];
+    nextIndex = 0;
   }
 
   state.selectedTrackId = track.id;
@@ -181,16 +241,15 @@ export function nextTrack() {
   refreshQueueIndex();
 
   let nextIndex;
-  if (state.shuffle) {
-    nextIndex = Math.floor(Math.random() * state.queue.length);
-    if (state.queue.length > 1 && nextIndex === state.queueIndex) {
-      nextIndex = (nextIndex + 1) % state.queue.length;
-    }
-  } else {
-    nextIndex = state.queueIndex + 1;
-    if (nextIndex >= state.queue.length) {
-      if (state.repeat !== "all") return;
-      nextIndex = 0;
+  nextIndex = state.queueIndex + 1;
+  if (nextIndex >= state.queue.length) {
+    if (state.repeat !== "all") return;
+    nextIndex = 0;
+    if (state.shuffle && state.queue.length > 2) {
+      const currentId = state.currentTrackId;
+      const remaining = state.queue.filter(id => id !== currentId);
+      state.queue = currentId ? [currentId, ...shuffleIds(remaining)] : shuffleIds(state.queue);
+      nextIndex = currentId ? 1 : 0;
     }
   }
   playTrack(state.queue[nextIndex], state.queue, nextIndex);

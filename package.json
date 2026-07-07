@@ -8,7 +8,7 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "build:glass": "esbuild public/react/liquid-glass-islands.jsx --bundle --format=esm --minify --outfile=public/generated/liquid-glass-islands.js",
-    "test": "node --check src/server.js"
+    "test": "node scripts/check-backend.js"
   },
   "engines": {
     "node": ">=18"

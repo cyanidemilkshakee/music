@@ -1,11 +1,11 @@
 import { state } from "./state.js";
 import { el } from "./dom.js";
 import { icons } from "./icons.js";
-import { playPause, nextTrack, prevTrack, storedVolume } from "./player.js";
+import { playPause, nextTrack, prevTrack, storedVolume, setShuffle, cycleRepeat } from "./player.js";
 import { setView, goBack } from "./navigation.js";
 import { closeImportSheet, openImportSheet } from "./import-lib.js";
 import { updateVolumeUI } from "./audio.js";
-import { renderTransport, renderQueue } from "./render.js";
+import { renderQueue } from "./render.js";
 import { closeCtx } from "./context-menu.js";
 import { closePlaylistPicker } from "./playlists.js";
 
@@ -118,12 +118,6 @@ export function toggleShortcuts() {
   isOpen ? closeShortcuts() : openShortcuts();
 }
 
-export function cycleRepeat() {
-  const cycle = { none: "all", all: "one", one: "none" };
-  state.repeat = cycle[state.repeat] || "none";
-  renderTransport();
-}
-
 overlay.addEventListener("click", event => {
   if (event.target === overlay) closeShortcuts();
 });
@@ -213,8 +207,7 @@ document.addEventListener("keydown", event => {
       break;
     case "KeyS":
       event.preventDefault();
-      state.shuffle = !state.shuffle;
-      renderTransport();
+      setShuffle(!state.shuffle);
       break;
     case "KeyH":
       event.preventDefault();

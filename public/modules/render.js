@@ -259,7 +259,11 @@ export function renderQueue() {
     .map((id, i) => ({ track: byId.get(id), index: i }))
     .filter(e => e.track);
 
-  el.queueCount.textContent    = `${entries.length} ${entries.length === 1 ? "song" : "songs"}`;
+  const modeParts = [];
+  if (state.shuffle) modeParts.push("shuffled");
+  if (state.repeat === "all") modeParts.push("repeat all");
+  if (state.repeat === "one") modeParts.push("repeat one");
+  el.queueCount.textContent = `${entries.length} ${entries.length === 1 ? "song" : "songs"}${modeParts.length ? ` • ${modeParts.join(" • ")}` : ""}`;
   el.queueClearButton.disabled = entries.length === 0;
 
   if (!entries.length) {
@@ -267,17 +271,28 @@ export function renderQueue() {
     return;
   }
 
-  el.queueList.innerHTML = entries.map(({ track, index }) => `
+  el.queueList.innerHTML = entries.map(({ track, index }) => {
+    const isCurrent = index === state.queueIndex;
+    const badges = [];
+    if (isCurrent) badges.push("Now");
+    if (state.shuffle && index > state.queueIndex) badges.push("Shuffled");
+    if (isCurrent && state.repeat === "one") badges.push("Repeating");
+    if (state.repeat === "all" && state.queueIndex >= 0 && index === 0 && index < state.queueIndex) badges.push("Loops");
+    return `
     <button class="queue-item ${index === state.queueIndex ? "is-current" : ""}"
             data-queue-index="${index}" type="button">
       <img class="queue-art" src="${coverUrl(track)}" alt="" onerror="this.onerror=null;this.src='${DEFAULT_COVER}'">
       <span class="queue-copy">
         <span class="queue-title">${esc(trackTitle(track))}</span>
-        <span class="queue-artist">${esc(track.artist || "Unknown Artist")}</span>
+        <span class="queue-artist">
+          ${esc(track.artist || "Unknown Artist")}
+          ${badges.length ? `<span class="queue-badges">${badges.map(badge => `<span class="queue-badge">${esc(badge)}</span>`).join("")}</span>` : ""}
+        </span>
       </span>
       <span class="queue-duration">${fmt(track.duration)}</span>
       <span class="queue-remove" data-queue-remove="${index}" title="Remove">${icons.x}</span>
-    </button>`).join("");
+    </button>`;
+  }).join("");
 }
 
 // ── Full Render ───────────────────────────────────────────────────────────────

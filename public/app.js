@@ -7,7 +7,6 @@ import { groupTracks } from "./modules/groups.js";
 import {
   render,
   renderGrid,
-  renderTransport,
   renderPlaylistsSidebar,
   renderQueue,
   toggleEmptyState
@@ -22,7 +21,9 @@ import {
   clearQueue,
   removeQueueItem,
   playPlaylist,
-  storedVolume
+  storedVolume,
+  setShuffle,
+  cycleRepeat
 } from "./modules/player.js";
 import { updateVolumeUI } from "./modules/audio.js";
 import { openImportSheet, closeImportSheet, doImport } from "./modules/import-lib.js";
@@ -245,7 +246,10 @@ document.addEventListener("click", event => {
       return;
     }
 
-    if (state.queueOpen && !el.queuePanel.contains(event.target) && !el.queueButton.contains(event.target)) {
+    if (state.queueOpen
+      && !el.queuePanel.contains(event.target)
+      && !el.queueButton.contains(event.target)
+      && !el.playerPill.contains(event.target)) {
       state.queueOpen = false;
       renderQueue();
     }
@@ -286,14 +290,13 @@ document.addEventListener("dblclick", event => {
 el.playButton.addEventListener("click", playPause);
 el.nextButton.addEventListener("click", nextTrack);
 el.prevButton.addEventListener("click", prevTrack);
-el.shuffleButton.addEventListener("click", () => {
-  state.shuffle = !state.shuffle;
-  renderTransport();
+el.shuffleButton.addEventListener("click", event => {
+  event.stopPropagation();
+  setShuffle(!state.shuffle);
 });
-el.repeatButton.addEventListener("click", () => {
-  const cycle = { none: "all", all: "one", one: "none" };
-  state.repeat = cycle[state.repeat] || "none";
-  renderTransport();
+el.repeatButton.addEventListener("click", event => {
+  event.stopPropagation();
+  cycleRepeat();
 });
 
 el.moreButton.addEventListener("click", event => {

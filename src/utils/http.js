@@ -4,7 +4,8 @@ class HttpError extends Error {
     this.name = 'HttpError';
     this.statusCode = statusCode;
     this.expose = statusCode < 500;
-    if (options.detail) this.detail = options.detail;
+    if (options.detail) this.detail = String(options.detail).slice(0, 2000);
+    if (options.cause) this.cause = options.cause;
   }
 }
 
@@ -14,7 +15,11 @@ function httpError(statusCode, message, options) {
 
 function asyncHandler(handler) {
   return (req, res, next) => {
-    Promise.resolve(handler(req, res, next)).catch(next);
+    try {
+      Promise.resolve(handler(req, res, next)).catch(next);
+    } catch (error) {
+      next(error);
+    }
   };
 }
 
@@ -46,7 +51,11 @@ function optionalString(value, fallback, label, options = {}) {
 }
 
 function routeId(value, label = 'Id') {
-  return requireString(value, label, { maxLength: 200 });
+  const id = requireString(value, label, { maxLength: 200 });
+  if (!/^[a-zA-Z0-9._:-]+$/.test(id)) {
+    throw httpError(400, `${label} contains invalid characters.`);
+  }
+  return id;
 }
 
 module.exports = {

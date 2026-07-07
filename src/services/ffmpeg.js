@@ -118,8 +118,12 @@ const CACHE_DIR = path.join(__dirname, '..', '..', 'data', 'cache');
 if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
 function cachePathForTrack(track) {
+  if (!track || !track.id || !track.path) {
+    throw new Error('Track id and path are required for cache lookup.');
+  }
   const basis = `${track.path}|${track.modifiedAt}|${track.size}`;
-  return path.join(CACHE_DIR, `${track.id}-${hash(basis).slice(0, 16)}.mp3`);
+  const safeId = String(track.id).replace(/[^a-zA-Z0-9._:-]/g, '_').slice(0, 120);
+  return path.join(CACHE_DIR, `${safeId}-${hash(basis).slice(0, 16)}.mp3`);
 }
 
 async function removeIfExists(filePath) {
@@ -133,6 +137,11 @@ async function isUsableCacheFile(filePath) {
 
 async function ensureDecoded(track) {
   const outputPath = cachePathForTrack(track);
+  const outputDir = path.dirname(outputPath);
+  if (path.resolve(outputDir) !== path.resolve(CACHE_DIR)) {
+    throw new Error('Resolved cache path escaped cache directory.');
+  }
+
   if (await isUsableCacheFile(outputPath)) {
     return outputPath;
   }
@@ -143,7 +152,7 @@ async function ensureDecoded(track) {
     await removeIfExists(outputPath);
 
     await fs.promises.access(track.path, fs.constants.R_OK);
-    const tempPath = outputPath.replace(/\.mp3$/i, `.${process.pid}.${Date.now()}.tmp.mp3`);
+    const tempPath = path.join(CACHE_DIR, `${path.basename(outputPath, '.mp3')}.${process.pid}.${Date.now()}.${crypto.randomUUID()}.tmp.mp3`);
 
     try {
       await runProcess(FFMPEG_PATH, [
@@ -156,6 +165,7 @@ async function ensureDecoded(track) {
       if (!await isUsableCacheFile(tempPath)) {
         throw new Error('Transcoded audio cache was empty.');
       }
+      await removeIfExists(outputPath);
       await fs.promises.rename(tempPath, outputPath);
       return outputPath;
     } catch (error) {

@@ -14,6 +14,7 @@ const AUDIO_EXTENSIONS = new Set([
 
 const SCAN_CONCURRENCY = positiveIntegerEnv('SCAN_CONCURRENCY', 8, { min: 1, max: 32 });
 const MAX_SCAN_FILES = positiveIntegerEnv('MAX_SCAN_FILES', 100_000, { min: 1, max: 1_000_000 });
+const MAX_SCAN_FAILURES = positiveIntegerEnv('MAX_SCAN_FAILURES', 1000, { min: 1, max: 100_000 });
 
 let scanInFlight = false;
 
@@ -99,6 +100,17 @@ function failure(pathValue, message) {
   };
 }
 
+function pushFailure(failures, pathValue, message) {
+  if (failures.length < MAX_SCAN_FAILURES) {
+    failures.push(failure(pathValue, message));
+    return;
+  }
+  const last = failures[failures.length - 1];
+  if (!last || last.path !== '[scan]') {
+    failures.push(failure('[scan]', `Additional failures omitted after ${MAX_SCAN_FAILURES} entries.`));
+  }
+}
+
 async function walkAudioFiles(directory, failures) {
   const files = [];
   const visitedDirectories = new Set();
@@ -114,7 +126,7 @@ async function walkAudioFiles(directory, failures) {
     try {
       realPath = await fs.promises.realpath(current);
     } catch (error) {
-      failures.push(failure(current, error.message));
+      pushFailure(failures, current, error.message);
       return;
     }
 
@@ -126,7 +138,7 @@ async function walkAudioFiles(directory, failures) {
     try {
       entries = await fs.promises.readdir(realPath, { withFileTypes: true });
     } catch (error) {
-      failures.push(failure(realPath, error.message));
+      pushFailure(failures, realPath, error.message);
       return;
     }
 
@@ -151,7 +163,7 @@ async function walkAudioFiles(directory, failures) {
 
   await walk(directory);
   if (stoppedAtLimit) {
-    failures.push(failure(directory, `Scan stopped after ${MAX_SCAN_FILES} audio files. Set MAX_SCAN_FILES to raise the limit.`));
+    pushFailure(failures, directory, `Scan stopped after ${MAX_SCAN_FILES} audio files. Set MAX_SCAN_FILES to raise the limit.`);
   }
   return files;
 }
@@ -179,7 +191,7 @@ async function scanDirectoryImpl(directory) {
       db.upsertTrack(track);
       tracks.push(track);
     } catch (error) {
-      failures.push(failure(file, error.message));
+      pushFailure(failures, file, error.message);
     }
   })));
 

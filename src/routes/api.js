@@ -22,12 +22,17 @@ router.get('/health', asyncHandler(async (req, res) => {
       .then(result => ({ ok: true, version: result.stdout.split(/\r?\n/)[0] }))
       .catch(error => ({ ok: false, version: error.message }))
   ]);
+  const database = db.getHealth();
 
-  res.json({
-    ok: ffmpeg.ok && ffprobe.ok,
+  const payload = {
+    ok: ffmpeg.ok && ffprobe.ok && database.ok,
     ffmpeg: ffmpeg.version,
-    ffprobe: ffprobe.version
-  });
+    ffprobe: ffprobe.version,
+    database,
+    uptime: process.uptime()
+  };
+
+  res.status(payload.ok ? 200 : 503).json(payload);
 }));
 
 router.get('/state', asyncHandler((req, res) => {
@@ -72,7 +77,7 @@ router.post('/playlists', asyncHandler((req, res) => {
     name: playlistName(req.body?.name),
     createdAt: now,
     updatedAt: now,
-    trackIds: Array.isArray(req.body?.trackIds) ? req.body.trackIds.slice(0, 1000) : []
+    trackIds: Array.isArray(req.body?.trackIds) ? req.body.trackIds : []
   });
 
   res.status(201).json({ playlist, playlists: db.getAllPlaylists() });

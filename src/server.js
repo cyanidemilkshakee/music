@@ -35,7 +35,16 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(compression());
+app.use(compression({
+  filter(req, res) {
+    if (req.path.startsWith('/api/audio/')
+      || req.path.startsWith('/api/stream/')
+      || req.path.startsWith('/api/artwork/')) {
+      return false;
+    }
+    return compression.filter(req, res);
+  }
+}));
 app.use(express.json({ limit: JSON_LIMIT }));
 
 app.use(express.static(PUBLIC_DIR, {
@@ -107,6 +116,12 @@ server.on('error', error => {
     console.error('Server failed:', error);
   }
   process.exitCode = 1;
+});
+
+server.on('clientError', (error, socket) => {
+  if (!socket.writable) return;
+  const status = error.code === 'HPE_HEADER_OVERFLOW' ? 431 : 400;
+  socket.end(`HTTP/1.1 ${status} Bad Request\r\nConnection: close\r\n\r\n`);
 });
 
 let shuttingDown = false;

@@ -14,7 +14,7 @@ function hash(value) {
 }
 
 function trackVersion(track) {
-  return encodeURIComponent(`${track.modifiedAt || ''}-${track.size || ''}`);
+  return hash(`${track.id || ''}|${track.modifiedAt || ''}|${track.size || ''}`).slice(0, 24);
 }
 
 function getTrackOrThrow(id) {
@@ -46,7 +46,10 @@ function parseRangeHeader(rangeHeader, size) {
   if (!rangeHeader) return null;
   if (!Number.isSafeInteger(size) || size <= 0) throw httpError(416, 'Range not satisfiable.');
 
-  const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+  const normalized = String(rangeHeader).trim();
+  if (normalized.includes(',')) throw httpError(416, 'Multiple ranges are not supported.');
+
+  const match = /^bytes=(\d*)-(\d*)$/.exec(normalized);
   if (!match) throw httpError(416, 'Invalid range.');
 
   let start;
@@ -72,6 +75,19 @@ function parseRangeHeader(rangeHeader, size) {
     start,
     end: Math.min(end, size - 1)
   };
+}
+
+async function statReadableFile(filePath, missingMessage) {
+  const stat = await fs.promises.stat(filePath).catch(error => {
+    throw httpError(404, missingMessage, { detail: error.message, cause: error });
+  });
+  if (!stat.isFile() || stat.size <= 0) {
+    throw httpError(404, missingMessage);
+  }
+  await fs.promises.access(filePath, fs.constants.R_OK).catch(error => {
+    throw httpError(404, missingMessage, { detail: error.message, cause: error });
+  });
+  return stat;
 }
 
 router.post('/decode/:id', asyncHandler(async (req, res) => {
@@ -136,22 +152,23 @@ router.get('/stream/:id', asyncHandler(async (req, res) => {
   });
 }));
 
-router.get('/audio/:id', asyncHandler(async (req, res) => {
+async function sendAudio(req, res) {
   const id = routeId(req.params.id, 'Track id');
   const track = getTrackOrThrow(id);
   const decodedPath = cachePathForTrack(track);
-  const stat = await fs.promises.stat(decodedPath).catch(error => {
-    throw httpError(404, 'Audio cache not found.', { detail: error.message });
-  });
-  if (!stat.isFile() || stat.size <= 0) {
-    throw httpError(404, 'Audio cache is not ready.');
+  const stat = await statReadableFile(decodedPath, 'Audio cache is not ready.');
+  const etag = `"${trackVersion(track)}"`;
+
+  if (req.headers['if-none-match'] === etag) {
+    res.status(304).end();
+    return;
   }
 
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Type', 'audio/mpeg');
   res.setHeader('Content-Length', stat.size);
   res.setHeader('Cache-Control', 'public, max-age=86400');
-  res.setHeader('ETag', `"${trackVersion(track)}"`);
+  res.setHeader('ETag', etag);
 
   let range;
   try {
@@ -185,6 +202,24 @@ router.get('/audio/:id', asyncHandler(async (req, res) => {
     return;
   }
   pipeFileToResponse(decodedPath, res, range);
+}
+
+router.get('/audio/:id', asyncHandler(sendAudio));
+router.head('/audio/:id', asyncHandler(sendAudio));
+
+router.get('/cache/:id', asyncHandler(async (req, res) => {
+  const id = routeId(req.params.id, 'Track id');
+  const track = getTrackOrThrow(id);
+  const decodedPath = cachePathForTrack(track);
+  const ready = await fs.promises.stat(decodedPath)
+    .then(stat => stat.isFile() && stat.size > 0)
+    .catch(() => false);
+
+  res.json({
+    id: track.id,
+    ready,
+    audioUrl: ready ? `/api/audio/${encodeURIComponent(track.id)}?v=${trackVersion(track)}` : null
+  });
 }));
 
 router.get('/artwork/:id', asyncHandler(async (req, res) => {

@@ -13,6 +13,7 @@ db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
 db.pragma('busy_timeout = 5000');
+db.pragma('wal_autocheckpoint = 1000');
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS tracks (
@@ -94,6 +95,19 @@ db.exec(`
     ON tracks (artist);
 `);
 
+function repairOrphanedRows() {
+  db.exec(`
+    DELETE FROM playlist_tracks
+      WHERE playlistId IS NULL
+         OR trackId IS NULL
+         OR playlistId NOT IN (SELECT id FROM playlists)
+         OR trackId NOT IN (SELECT id FROM tracks);
+    DELETE FROM recent
+      WHERE trackId IS NULL
+         OR trackId NOT IN (SELECT id FROM tracks);
+  `);
+}
+
 const trackSelect = `
   SELECT *
   FROM tracks
@@ -124,6 +138,20 @@ function nowIso() {
 function normalizePlaylistName(name) {
   const normalized = String(name || 'Untitled Playlist').replace(/\s+/g, ' ').trim();
   return normalized.slice(0, 120) || 'Untitled Playlist';
+}
+
+function uniqueTrackIds(trackIds, limit = 1000) {
+  if (!Array.isArray(trackIds)) return [];
+  const ids = [];
+  const seen = new Set();
+  for (const value of trackIds) {
+    const id = String(value || '').trim();
+    if (!id || seen.has(id) || id.length > 200) continue;
+    seen.add(id);
+    ids.push(id);
+    if (ids.length >= limit) break;
+  }
+  return ids;
 }
 
 function getAllTracks() {
@@ -178,7 +206,7 @@ function upsertTrack(track) {
       tags=excluded.tags
   `);
 
-  stmt.run({
+  db.transaction(() => stmt.run({
     id: track.id,
     path: track.path,
     fileName: track.fileName || path.basename(track.path),
@@ -204,7 +232,7 @@ function upsertTrack(track) {
     metadataExtractedAt: track.metadataExtractedAt || nowIso(),
     hasArtwork: track.hasArtwork ? 1 : 0,
     tags: JSON.stringify(track.tags || {})
-  });
+  }))();
 }
 
 function hydratePlaylist(row) {
@@ -259,7 +287,7 @@ const createPlaylistTx = db.transaction(playlist => {
     INSERT OR IGNORE INTO playlist_tracks (playlistId, trackId, position)
     VALUES (?, ?, ?)
   `);
-  for (const [index, trackId] of [...new Set(playlist.trackIds || [])].entries()) {
+  for (const [index, trackId] of uniqueTrackIds(playlist.trackIds).entries()) {
     if (getTrackById(trackId)) insertTrack.run(nextPlaylist.id, trackId, index);
   }
 
@@ -382,8 +410,29 @@ function getStats() {
   return { ...stats, genres };
 }
 
+function getHealth() {
+  const integrity = db.pragma('integrity_check', { simple: true });
+  const quick = db.pragma('quick_check', { simple: true });
+  const foreignKeys = db.pragma('foreign_key_check');
+  return {
+    ok: integrity === 'ok' && quick === 'ok' && foreignKeys.length === 0,
+    integrity,
+    quick,
+    foreignKeyErrors: foreignKeys.length,
+    wal: db.pragma('journal_mode', { simple: true }),
+    stats: getStats()
+  };
+}
+
 function close() {
-  if (db.open) db.close();
+  if (!db.open) return;
+  try {
+    repairOrphanedRows();
+    db.pragma('optimize');
+    db.pragma('wal_checkpoint(TRUNCATE)');
+  } finally {
+    db.close();
+  }
 }
 
 module.exports = {
@@ -401,5 +450,6 @@ module.exports = {
   addRecent,
   getRecentIds,
   getStats,
+  getHealth,
   close
 };
