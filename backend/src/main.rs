@@ -9,7 +9,10 @@ use tower_http::{
     compression::CompressionLayer,
     services::{ServeDir, ServeFile},
     limit::RequestBodyLimitLayer,
+    cors::{CorsLayer, Any},
+    timeout::TimeoutLayer,
 };
+use std::time::Duration;
 use tracing::{info, Level};
 use tracing_subscriber::{FmtSubscriber, EnvFilter};
 
@@ -23,6 +26,7 @@ mod error;
 mod middleware;
 mod routes;
 mod services;
+mod metrics;
 
 use crate::config::Config;
 use crate::routes::AppState;
@@ -37,6 +41,8 @@ async fn main() -> anyhow::Result<()> {
     let _ = tracing::subscriber::set_global_default(subscriber);
 
     info!("Starting Local Amp Backend (Rust)");
+
+    crate::metrics::install();
 
     let config = Arc::new(Config::from_env());
 
@@ -62,8 +68,11 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .nest("/api", routes::media::router())
         .nest("/api", routes::api::router())
+        .nest("/metrics", metrics::router())
         .fallback_service(serve_dir)
         .with_state(app_state)
+        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
+        .layer(TimeoutLayer::new(Duration::from_millis(config.request_timeout_ms)))
         .layer(axum_middleware::from_fn(middleware::compression_bypass_middleware))
         .layer(CompressionLayer::new())
         .layer(RequestBodyLimitLayer::new(config.json_limit))

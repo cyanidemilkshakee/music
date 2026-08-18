@@ -24,6 +24,7 @@ pub fn router() -> Router<AppState> {
         .route("/recent", get(get_recent))
         .route("/recent/:id", post(add_recent))
         .route("/scan", post(scan_directory))
+        .route("/scan/:id/stream", get(scan_stream))
         .route("/metadata/:id", post(extract_metadata))
         .route("/playlists", post(create_playlist))
         .route("/playlists/:id", patch(update_playlist))
@@ -168,15 +169,52 @@ struct ScanReq {
     directory: String,
 }
 
+use axum::response::sse::{Event, Sse};
+use futures_util::stream::{self, Stream};
+use std::convert::Infallible;
+
 async fn scan_directory(
     State(state): State<AppState>,
     Json(payload): Json<ScanReq>,
 ) -> Result<impl IntoResponse, AppError> {
     payload.validate()?;
     let path = PathBuf::from(payload.directory);
-    let cancel = CancellationToken::new(); // Dummy token for now, Phase 4 handles real SSE
-    let result = state.scanner.scan_directory(path, None, cancel).await?;
-    Ok(Json(result))
+    let job_id = state.scanner.start_scan(path).await?;
+    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "jobId": job_id }))))
+}
+
+async fn scan_stream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
+    let active_scan = state.scanner.get_active_scan().await;
+    
+    let active = match active_scan {
+        Some(s) if s.job_id == id => s,
+        _ => {
+            return Err(AppError::Http {
+                status: StatusCode::NOT_FOUND,
+                message: "No active scan found for this Job ID.".to_string(),
+                detail: None,
+            });
+        }
+    };
+
+    let rx = active.tx.subscribe();
+    
+    let stream = stream::unfold(rx, |mut rx| async move {
+        if let Ok(event) = rx.recv().await {
+            if let Ok(json) = serde_json::to_string(&event) {
+                Some((Ok(Event::default().data(json)), rx))
+            } else {
+                Some((Ok(Event::default().data("{}")), rx))
+            }
+        } else {
+            None // Channel closed or lagged
+        }
+    });
+
+    Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::new()))
 }
 
 async fn extract_metadata(

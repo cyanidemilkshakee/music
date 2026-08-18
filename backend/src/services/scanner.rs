@@ -13,12 +13,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::fs;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use tokio::task::spawn_blocking;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-pub static SCAN_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+#[derive(Clone)]
+pub struct ActiveScan {
+    pub job_id: String,
+    pub tx: broadcast::Sender<ScanEvent>,
+    pub cancel: CancellationToken,
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,15 +138,27 @@ fn parse_track(file_path: &Path, meta: std::fs::Metadata, probe: serde_json::Val
     }
 }
 
+#[derive(Clone)]
 pub struct ScannerService {
     config: Arc<Config>,
     ffmpeg: FfmpegService,
     pool: Pool<SqliteConnectionManager>,
+    active_scan: Arc<tokio::sync::Mutex<Option<ActiveScan>>>,
 }
 
 impl ScannerService {
     pub fn new(config: Arc<Config>, ffmpeg: FfmpegService, pool: Pool<SqliteConnectionManager>) -> Self {
-        Self { config, ffmpeg, pool }
+        Self { 
+            config, 
+            ffmpeg, 
+            pool,
+            active_scan: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+    
+    pub async fn get_active_scan(&self) -> Option<ActiveScan> {
+        let lock = self.active_scan.lock().await;
+        lock.clone()
     }
 
     fn is_audio_ext(path: &Path) -> bool {
@@ -152,13 +169,12 @@ impl ScannerService {
             .unwrap_or(false)
     }
 
-    pub async fn scan_directory(
+    pub async fn start_scan(
         &self,
         directory: PathBuf,
-        progress: Option<mpsc::Sender<ScanEvent>>,
-        cancel: CancellationToken,
-    ) -> Result<ScanResult, AppError> {
-        if SCAN_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+    ) -> Result<String, AppError> {
+        let mut lock = self.active_scan.lock().await;
+        if lock.is_some() {
             return Err(AppError::Http {
                 status: axum::http::StatusCode::CONFLICT,
                 message: "A library scan is already running.".to_string(),
@@ -166,15 +182,31 @@ impl ScannerService {
             });
         }
 
-        let res = self.scan_directory_impl(directory, progress, cancel).await;
-        SCAN_IN_FLIGHT.store(false, Ordering::SeqCst);
-        res
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let (tx, _) = broadcast::channel(100);
+        let cancel = CancellationToken::new();
+
+        let active_scan = ActiveScan {
+            job_id: job_id.clone(),
+            tx: tx.clone(),
+            cancel: cancel.clone(),
+        };
+        *lock = Some(active_scan);
+
+        let scanner = self.clone();
+        tokio::spawn(async move {
+            let _ = scanner.scan_directory_impl(directory, tx, cancel).await;
+            let mut lock = scanner.active_scan.lock().await;
+            *lock = None;
+        });
+
+        Ok(job_id)
     }
 
     async fn scan_directory_impl(
         &self,
         directory: PathBuf,
-        progress: Option<mpsc::Sender<ScanEvent>>,
+        tx: broadcast::Sender<ScanEvent>,
         cancel: CancellationToken,
     ) -> Result<ScanResult, AppError> {
         let resolved = fs::canonicalize(&directory).await.map_err(|e| AppError::Http {
@@ -247,14 +279,12 @@ impl ScannerService {
                 }
             }
 
-            if let Some(tx) = &progress {
-                let _ = tx.send(ScanEvent::Walk { found: files.len() }).await;
-            }
+            let _ = tx.send(ScanEvent::Walk { found: files.len() });
         }
 
         let total = files.len();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.scan_concurrency.get()));
-        let (tx_track, mut rx_track) = mpsc::channel(100);
+        let (tx_track, mut rx_track) = tokio::sync::mpsc::channel(100);
         let mut spawn_tasks = futures_util::stream::FuturesUnordered::new();
 
         for file in files {
@@ -290,11 +320,6 @@ impl ScannerService {
                 }
             }
 
-            if let Some(tx) = &progress {
-                let _ = tx.send(ScanEvent::Probe { done, total, errors }).await;
-            }
-
-            // Batch insert every 100 tracks
             if tracks_to_insert.len() >= 100 {
                 let batch = std::mem::take(&mut tracks_to_insert);
                 let pool = self.pool.clone();
@@ -304,6 +329,8 @@ impl ScannerService {
                     }
                 }).await?;
             }
+            
+            let _ = tx.send(ScanEvent::Probe { done, total, errors });
         }
 
         // Insert remainder
@@ -328,10 +355,11 @@ impl ScannerService {
             imported: done - errors,
             failures,
         };
+        
+        metrics::counter!("scanner_imported_total").increment(result.imported as u64);
+        metrics::counter!("scanner_failures_total").increment(result.failures.len() as u64);
 
-        if let Some(tx) = &progress {
-            let _ = tx.send(ScanEvent::Complete(result.clone())).await;
-        }
+        let _ = tx.send(ScanEvent::Complete(result.clone()));
 
         Ok(result)
     }

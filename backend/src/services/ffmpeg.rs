@@ -65,6 +65,7 @@ impl FfmpegService {
     }
 
     pub async fn probe_track_metadata(&self, file_path: &Path) -> Result<serde_json::Value, AppError> {
+        let start = std::time::Instant::now();
         let mut retry = false;
         loop {
             let output_res = timeout(
@@ -83,10 +84,13 @@ impl FfmpegService {
 
             match output_res {
                 Ok(Ok(output)) => {
+                    metrics::histogram!("ffmpeg_probe_duration_seconds").record(start.elapsed().as_secs_f64());
                     if output.status.success() {
+                        metrics::counter!("ffmpeg_probe_success_total").increment(1);
                         let json = serde_json::from_slice(&output.stdout)?;
                         return Ok(json);
                     } else {
+                        metrics::counter!("ffmpeg_probe_error_total").increment(1);
                         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                         return Err(AppError::Media {
                             message: format!("ffprobe exited with {}", output.status),
@@ -116,14 +120,19 @@ impl FfmpegService {
         
         // Double checked locking
         if Self::is_usable_cache_file(&output_path).await {
+            metrics::counter!("ffmpeg_decode_cache_hits_total").increment(1);
             return Ok(output_path);
         }
 
         let _permit = self.transcode_semaphore.acquire().await.unwrap();
         
         if Self::is_usable_cache_file(&output_path).await {
+            metrics::counter!("ffmpeg_decode_cache_hits_total").increment(1);
             return Ok(output_path);
         }
+        
+        metrics::counter!("ffmpeg_decode_cache_misses_total").increment(1);
+        let start = std::time::Instant::now();
 
         let temp_dir = self.config.data_dir.join("cache");
         fs::create_dir_all(&temp_dir).await?;
@@ -150,7 +159,9 @@ impl FfmpegService {
 
         match output_res {
             Ok(Ok(output)) => {
+                metrics::histogram!("ffmpeg_decode_duration_seconds").record(start.elapsed().as_secs_f64());
                 if !output.status.success() {
+                    metrics::counter!("ffmpeg_decode_error_total").increment(1);
                     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                     return Err(AppError::Media {
                         message: format!("ffmpeg exited with {}", output.status),
@@ -158,6 +169,7 @@ impl FfmpegService {
                         stderr,
                     });
                 }
+                metrics::counter!("ffmpeg_decode_success_total").increment(1);
             }
             Ok(Err(e)) => return Err(AppError::Io(e)),
             Err(e) => return Err(AppError::Timeout(e)),
