@@ -9,3 +9,16 @@ data/cache/
 data/library.json
 data/playlists.json
 *.log
+
+# Rust Build Artifacts
+target/
+backend/target/
+backend/test_data_api/
+
+# Environments
+.env
+.env.local
+.env.*
+
+# Frontend Build Output
+public/generated/liquid-glass-islands.js
