@@ -40,7 +40,7 @@ impl Config {
             .parse::<IpAddr>()
             .unwrap_or_else(|_| {
                 errors.push("HOST must be a valid IP address (e.g. 0.0.0.0 or 127.0.0.1)".to_string());
-                "0.0.0.0".parse().unwrap()
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(0,0,0,0))
             });
             
         let scan_concurrency = Self::parse_nonzero("SCAN_CONCURRENCY", 4, 1, 32, &mut errors);
@@ -114,7 +114,7 @@ impl Config {
     
     fn parse_nonzero(name: &str, default: usize, min: usize, max: usize, errors: &mut Vec<String>) -> NonZeroUsize {
         let val = Self::parse_usize(name, default, min, max, errors);
-        NonZeroUsize::new(val).unwrap_or(NonZeroUsize::new(default).unwrap())
+        NonZeroUsize::new(val).unwrap_or_else(|| NonZeroUsize::new(default).unwrap_or(NonZeroUsize::MIN))
     }
 
     fn parse_usize(name: &str, default: usize, min: usize, max: usize, errors: &mut Vec<String>) -> usize {
