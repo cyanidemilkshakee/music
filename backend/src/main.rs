@@ -44,9 +44,18 @@ async fn main() -> anyhow::Result<()> {
 
     crate::metrics::install();
 
-    let config = Arc::new(Config::from_env());
+    let config_val = Config::from_env().unwrap_or_else(|errs| {
+        for e in errs {
+            tracing::error!("Config error: {}", e);
+        }
+        std::process::exit(1);
+    });
+    
+    let config = Arc::new(config_val);
+    std::fs::create_dir_all(&config.data_dir)?;
+    let db_path = config.data_dir.join("local-amp.db");
 
-    let pool = db::pool::build_pool(&config)?;
+    let pool = db::pool::build_pool(&db_path)?;
     db::migrations::run_migrations(&mut pool.get()?)?;
 
     let ffmpeg = FfmpegService::new(config.clone());
@@ -60,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let current_dir = std::env::current_dir()?;
-    let public_dir = current_dir.parent().unwrap().join("public");
+    let public_dir = current_dir.parent().unwrap_or(&current_dir).join("public");
 
     let serve_dir = ServeDir::new(&public_dir)
         .not_found_service(ServeFile::new(public_dir.join("index.html")));
