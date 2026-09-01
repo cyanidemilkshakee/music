@@ -131,7 +131,11 @@ async fn stream_track(
             stderr: e.to_string(),
         })?;
 
-    let stdout = child.stdout.take().unwrap();
+    let stdout = child.stdout.take().ok_or_else(|| AppError::Media {
+        message: "Failed to capture ffmpeg stdout".to_string(),
+        exit_code: None,
+        stderr: String::new(),
+    })?;
     // stderr could be logged, but skipping for simplicity as stream handles it transparently
     
     let stream = ReaderStream::new(stdout);
@@ -223,7 +227,9 @@ async fn send_audio(
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/mpeg"));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=86400"));
-    headers.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
+    if let Ok(val) = HeaderValue::from_str(&etag) {
+        headers.insert(header::ETAG, val);
+    }
     
     let range_hdr = req.headers().get(header::RANGE).and_then(|v| v.to_str().ok());
     
@@ -231,7 +237,9 @@ async fn send_audio(
         Some(r) => match parse_range(r, size) {
             Ok(rng) => Some(rng),
             Err(_) => {
-                headers.insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes */{}", size)).unwrap());
+                if let Ok(val) = HeaderValue::from_str(&format!("bytes */{}", size)) {
+                    headers.insert(header::CONTENT_RANGE, val);
+                }
                 headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
                 return Ok((StatusCode::RANGE_NOT_SATISFIABLE, headers, Body::empty()).into_response());
             }
@@ -242,8 +250,12 @@ async fn send_audio(
     if let Some(rng) = range {
         let start = *rng.start();
         let end = *rng.end();
-        headers.insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes {}-{}/{}", start, end, size)).unwrap());
-        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_str(&format!("{}", end - start + 1)).unwrap());
+        if let Ok(val) = HeaderValue::from_str(&format!("bytes {}-{}/{}", start, end, size)) {
+            headers.insert(header::CONTENT_RANGE, val);
+        }
+        if let Ok(val) = HeaderValue::from_str(&format!("{}", end - start + 1)) {
+            headers.insert(header::CONTENT_LENGTH, val);
+        }
         
         if req.method() == axum::http::Method::HEAD {
             return Ok((StatusCode::PARTIAL_CONTENT, headers, Body::empty()).into_response());
@@ -256,7 +268,9 @@ async fn send_audio(
         return Ok((StatusCode::PARTIAL_CONTENT, headers, Body::from_stream(stream)).into_response());
     }
     
-    headers.insert(header::CONTENT_LENGTH, HeaderValue::from_str(&size.to_string()).unwrap());
+    if let Ok(val) = HeaderValue::from_str(&size.to_string()) {
+        headers.insert(header::CONTENT_LENGTH, val);
+    }
     if req.method() == axum::http::Method::HEAD {
         return Ok((StatusCode::OK, headers, Body::empty()).into_response());
     }
@@ -303,7 +317,9 @@ async fn send_artwork(
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=86400, stale-while-revalidate=604800"));
-    headers.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
+    if let Ok(val) = HeaderValue::from_str(&etag) {
+        headers.insert(header::ETAG, val);
+    }
 
     if req.method() == axum::http::Method::HEAD {
         return Ok((StatusCode::OK, headers, Body::empty()).into_response());
@@ -326,7 +342,11 @@ async fn send_artwork(
             stderr: e.to_string(),
         })?;
 
-    let stdout = child.stdout.take().unwrap();
+    let stdout = child.stdout.take().ok_or_else(|| AppError::Media {
+        message: "Failed to capture ffmpeg stdout".to_string(),
+        exit_code: None,
+        stderr: String::new(),
+    })?;
     let stream = ReaderStream::new(stdout);
     let body = Body::from_stream(stream);
 

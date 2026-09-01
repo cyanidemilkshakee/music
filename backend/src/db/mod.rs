@@ -261,7 +261,10 @@ pub fn create_playlist(conn: &mut Connection, mut playlist: Playlist) -> Result<
     tx.commit()?;
     
     // fetch hydrated
-    get_playlist_by_id(conn, &playlist.id).map(|opt| opt.unwrap())
+    let playlist_id = playlist.id.clone();
+    get_playlist_by_id(conn, &playlist_id).and_then(|opt| {
+        opt.ok_or_else(|| AppError::Database("Failed to retrieve created playlist".to_string()))
+    })
 }
 
 pub fn update_playlist_name(conn: &mut Connection, id: &str, name: &str) -> Result<Option<Playlist>, AppError> {

@@ -124,7 +124,14 @@ impl FfmpegService {
             return Ok(output_path);
         }
 
-        let _permit = self.transcode_semaphore.acquire().await.unwrap();
+        let _permit = match self.transcode_semaphore.acquire().await {
+            Ok(p) => p,
+            Err(_) => return Err(AppError::Media {
+                message: "Semaphore closed".to_string(),
+                exit_code: None,
+                stderr: String::new()
+            }),
+        };
         
         if Self::is_usable_cache_file(&output_path).await {
             metrics::counter!("ffmpeg_decode_cache_hits_total").increment(1);

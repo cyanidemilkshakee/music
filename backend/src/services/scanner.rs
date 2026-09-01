@@ -289,7 +289,10 @@ impl ScannerService {
 
         for file in files {
             if cancel.is_cancelled() { break; }
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => break, // semaphore closed, shouldn't happen but safe exit
+            };
             let ffmpeg = self.ffmpeg.clone();
             let tx = tx_track.clone();
 
