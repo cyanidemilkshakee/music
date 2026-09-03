@@ -6,12 +6,16 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "start:rust": "cd backend && cargo run --release",
+    "build:rust": "cd backend && cargo build --release",
+    "dev:rust": "cd backend && cargo watch -x run",
+    "test:rust": "cd backend && cargo test",
+    "bench:rust": "cd backend && cargo bench",
+    "lint:rust": "cd backend && cargo clippy -- -D warnings",
+    "audit:rust": "cd backend && cargo deny check",
     "dev": "nodemon src/server.js",
     "build:glass": "esbuild public/react/liquid-glass-islands.jsx --bundle --format=esm --minify --outfile=public/generated/liquid-glass-islands.js",
     "test": "node scripts/check-backend.js"
-  },
-  "engines": {
-    "node": ">=18"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
