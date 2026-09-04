@@ -49,16 +49,76 @@ export async function doImport(directory) {
   setImportStatus("Scanning...");
 
   try {
-    const data = await api("/api/scan", {
+    const initResponse = await fetch("/api/scan", {
       method: "POST",
-      body: JSON.stringify({ directory }),
-      timeoutMs: 0
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ directory })
     });
 
-    syncImportedTracks(data);
+    if (!initResponse.ok) {
+      let msg = "Import failed.";
+      try {
+        const errData = await initResponse.json();
+        msg = errData.detail || errData.error || msg;
+      } catch (e) {}
+      throw new Error(msg);
+    }
+    
+    const { jobId } = await initResponse.json();
+    if (!jobId) throw new Error("Did not receive a job ID.");
+    
+    const response = await fetch(`/api/scan/${jobId}/stream`, {
+      method: "GET"
+    });
 
-    const imported = Number(data.imported) || 0;
-    const failures = Array.isArray(data.failures) ? data.failures : [];
+    if (!response.ok) {
+      throw new Error("Failed to attach to scan stream.");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    
+    let resultData = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop(); // keep remainder
+      
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          const payload = line.slice(6);
+          if (!payload.trim()) continue;
+          
+          try {
+            const event = JSON.parse(payload);
+            if (event.phase === "walk") {
+               setImportStatus(`Found ${event.found} audio files...`);
+            } else if (event.phase === "probe") {
+               const p = Math.round((event.done / event.total) * 100);
+               setImportStatus(`Processing metadata... ${p}% (${event.done}/${event.total})`);
+            } else if (event.phase === "complete") {
+               resultData = event;
+            }
+          } catch(e) {
+             console.error("SSE parse error", e, payload);
+          }
+        }
+      }
+    }
+
+    if (!resultData) {
+      throw new Error("Scan finished without complete event.");
+    }
+
+    syncImportedTracks(resultData);
+
+    const imported = Number(resultData.imported) || 0;
+    const failures = Array.isArray(resultData.failures) ? resultData.failures : [];
     const skipped = failures.length;
     const firstFailure = failures[0]?.message ? ` First skipped: ${failures[0].message}` : "";
     const note = skipped ? ` (${skipped} skipped).${firstFailure}` : "";
