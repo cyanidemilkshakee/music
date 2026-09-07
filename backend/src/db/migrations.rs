@@ -30,6 +30,8 @@ pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
         .query_map([], |row| row.get(0))?
         .collect::<Result<Vec<i32>, _>>()?;
 
+    drop(stmt);
+
     for migration in MIGRATIONS {
         if !applied_versions.contains(&migration.version) {
             info!("Applying migration v{}", migration.version);
