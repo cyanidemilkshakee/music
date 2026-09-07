@@ -6,10 +6,26 @@ Local Amp is a local-only music player inspired by compact album-art-first playe
 - `ffmpeg` to stream-decode local tracks with low startup latency.
 - Roboto from `public/assets/fonts/Roboto-Regular.ttf`.
 - SQLite in `data/local-amp.db` for the local library, playlists, and recent plays.
+- A high-performance Rust backend (`axum` + `tokio`).
+
+## Prerequisites
+
+- **FFmpeg & FFprobe**: Must be installed and available in your `PATH` or configured via `.env`.
+- **Rust**: Ensure you have the Rust toolchain installed.
+- **Windows Users**: You must have the **MSVC C++ Build Tools** installed (specifically the desktop C++ workload) for the Rust backend to compile successfully natively.
+
+## Configuration
+
+We use environment variables for configuration. Copy the example file and modify as needed:
+```powershell
+cp .env.example .env
+```
+*Note: You can tune concurrency limits, ports, and FFmpeg paths in this file.*
 
 ## Run
 
 ```powershell
+npm install
 npm start
 ```
 
@@ -19,29 +35,12 @@ Then open:
 http://localhost:1111
 ```
 
-The server listens on port `1111`.
+The server defaults to port `1111`.
 
-Playback defaults to low-latency FFmpeg streaming, so a track can start before the whole file is transcoded. To force the older full decode-to-cache path:
+Playback defaults to low-latency FFmpeg streaming, so a track can start before the whole file is transcoded. To force the older full decode-to-cache path, edit your `.env` or set the variable inline:
 
 ```powershell
 $env:LOW_LATENCY_STREAMING="false"
-npm start
-```
-
-Useful backend tuning knobs:
-
-```powershell
-$env:SCAN_CONCURRENCY="8"
-$env:TRANSCODE_CONCURRENCY="4"
-$env:MAX_SCAN_FILES="100000"
-$env:REQUEST_TIMEOUT_MS="120000"
-```
-
-If Windows cannot find FFmpeg from Node, set explicit paths before starting:
-
-```powershell
-$env:FFMPEG_PATH="C:\Program Files\ffmpeg\bin\ffmpeg.exe"
-$env:FFPROBE_PATH="C:\Program Files\ffmpeg\bin\ffprobe.exe"
 npm start
 ```
 

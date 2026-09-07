@@ -35,6 +35,9 @@ use crate::services::scanner::ScannerService;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Attempt to load .env file; ignore if it doesn't exist
+    let _ = dotenvy::dotenv();
+
     let subscriber = FmtSubscriber::builder()
         .with_env_filter(EnvFilter::from_default_env().add_directive(Level::INFO.into()))
         .finish();
