@@ -73,5 +73,22 @@ export const el = {
   playlistPickerClose: document.querySelector("#playlistPickerClose"),
   playlistPickerDone: document.querySelector("#playlistPickerDone"),
   playlistPickerNew: document.querySelector("#playlistPickerNew"),
-  audio:       document.querySelector("#audio")
+  audio:       document.querySelector("#audio"),
+  
+  // Visualizer / Full Screen UI
+  waveformCanvas: document.querySelector("#waveformCanvas"),
+  fsExpandBtn:    document.querySelector("#fsExpandBtn"),
+  fullScreenPlayer: document.querySelector("#fullScreenPlayer"),
+  bgCanvas:       document.querySelector("#bg-canvas"),
+  fsCloseBtn:     document.querySelector("#fsCloseBtn"),
+  fsTrackTitle:   document.querySelector("#fsTrackTitle"),
+  fsTrackArtist:  document.querySelector("#fsTrackArtist"),
+  fsCurrentTime:  document.querySelector("#fsCurrentTime"),
+  fsTimeRemaining:document.querySelector("#fsTimeRemaining"),
+  fsWaveformCanvas: document.querySelector("#fsWaveformCanvas"),
+  fsShuffleButton: document.querySelector("#fsShuffleButton"),
+  fsPrevButton:   document.querySelector("#fsPrevButton"),
+  fsPlayButton:   document.querySelector("#fsPlayButton"),
+  fsNextButton:   document.querySelector("#fsNextButton"),
+  fsRepeatButton: document.querySelector("#fsRepeatButton")
 };

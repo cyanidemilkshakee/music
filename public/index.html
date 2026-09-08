@@ -6,6 +6,7 @@
     <title>Apple Music - Local</title>
     <meta name="description" content="High-fidelity local music player with an Apple Music macOS interface.">
     <link rel="stylesheet" href="/styles.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>">
   </head>
   <body>
     <div class="import-sheet is-hidden" id="importSheet">
@@ -143,10 +144,8 @@
             <div class="scrubber-wrap">
               <span class="time-label" id="currentTime">0:00</span>
               <div class="scrubber-bar" id="scrubberBar">
-                <div class="scrubber-bg">
-                  <div class="scrubber-progress" id="scrubberProgress"></div>
-                  <div class="scrubber-handle" id="scrubberHandle"></div>
-                </div>
+                <canvas class="waveform-canvas" id="waveformCanvas"></canvas>
+                <div class="scrubber-handle" id="scrubberHandle"></div>
               </div>
               <span class="time-label" id="timeRemaining">-0:00</span>
             </div>
@@ -164,6 +163,7 @@
           </div>
 
           <div class="pill-right">
+            <button class="icon-btn" id="fsExpandBtn" title="Full Screen Visualizer" type="button"><span data-icon="maximize"></span></button>
             <button class="icon-btn" id="playerPlaylistButton" title="Add current track to playlist" aria-label="Add current track to playlist" type="button"><span data-icon="plus"></span></button>
             <button class="icon-btn" id="moreButton" title="More" type="button"><span data-icon="more"></span></button>
             <button class="icon-btn" id="queueButton" title="Queue" type="button"><span data-icon="queue"></span></button>
@@ -173,6 +173,36 @@
                 <div class="scrubber-bg">
                   <div class="scrubber-progress vol-progress" id="volProgress"></div>
                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="fullScreenPlayer" class="fs-player is-hidden" aria-hidden="true">
+          <canvas id="bg-canvas" class="fs-canvas"></canvas>
+          <div class="fs-ui">
+            <div class="fs-header">
+              <button class="icon-btn fs-close-btn" id="fsCloseBtn" title="Close Full Screen" type="button"><span data-icon="chevron-down"></span></button>
+            </div>
+            <div class="fs-content">
+              <!-- Three.js renders the vinyl in the canvas behind this -->
+            </div>
+            <div class="fs-footer">
+              <div class="fs-info">
+                <h2 id="fsTrackTitle" class="fs-title">Not Playing</h2>
+                <h3 id="fsTrackArtist" class="fs-artist">Local Amp</h3>
+              </div>
+              <div class="fs-scrubber-wrap">
+                <span class="fs-time-label" id="fsCurrentTime">0:00</span>
+                <canvas class="fs-waveform" id="fsWaveformCanvas"></canvas>
+                <span class="fs-time-label" id="fsTimeRemaining">-0:00</span>
+              </div>
+              <div class="fs-transport">
+                <button class="icon-btn" id="fsShuffleButton" type="button"><span data-icon="shuffle"></span></button>
+                <button class="icon-btn" id="fsPrevButton" type="button"><span data-icon="skip-back"></span></button>
+                <button class="icon-btn fs-play-btn" id="fsPlayButton" type="button"><span data-icon="play-solid"></span></button>
+                <button class="icon-btn" id="fsNextButton" type="button"><span data-icon="skip-forward"></span></button>
+                <button class="icon-btn" id="fsRepeatButton" type="button"><span data-icon="repeat"></span></button>
               </div>
             </div>
           </div>

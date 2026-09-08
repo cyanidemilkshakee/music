@@ -14,6 +14,24 @@ export function toggleEmptyState() {
   el.contentScroll.classList.toggle("is-hidden", !hasTracks);
 }
 
+let _vtRunning = false;
+
+function withViewTransition(callback) {
+  if (!document.startViewTransition || _vtRunning) {
+    callback();
+    return;
+  }
+  _vtRunning = true;
+  try {
+    const t = document.startViewTransition(callback);
+    t.finished.catch(() => {}).finally(() => { _vtRunning = false; });
+  } catch (_) {
+    // InvalidStateError or AbortError — just run directly
+    _vtRunning = false;
+    callback();
+  }
+}
+
 // ── View Title ────────────────────────────────────────────────────────────────
 export function renderViewTitle() {
   const group    = activeGroup();
@@ -81,6 +99,10 @@ function renderPlaylistCollection() {
 
 // ── Track / Group Grid ────────────────────────────────────────────────────────
 export function renderGrid() {
+  withViewTransition(_renderGrid);
+}
+
+function _renderGrid() {
   if (state.activeView === "playlists" && !state.activePlaylistId) {
     renderPlaylistCollection();
     return;
@@ -178,6 +200,10 @@ export function renderGrid() {
 
 // ── Now Playing Panel ─────────────────────────────────────────────────────────
 export function renderNowPlaying() {
+  withViewTransition(_renderNowPlaying);
+}
+
+function _renderNowPlaying() {
   const track = currentTrack() || selectedTrack();
   if (!track) {
     el.trackTitle.textContent  = "Not Playing";
@@ -236,8 +262,8 @@ export function updateProgress() {
   const pct      = duration ? Math.max(0, Math.min(100, (current / duration) * 100)) : 0;
   el.currentTime.textContent  = fmt(current);
   el.timeRemaining.textContent = `-${fmt(Math.max(0, duration - current))}`;
-  el.scrubberProgress.style.width = `${pct}%`;
-  el.scrubberHandle.style.left    = `${pct}%`;
+  if (el.scrubberProgress) el.scrubberProgress.style.width = `${pct}%`;
+  if (el.scrubberHandle) el.scrubberHandle.style.left = `${pct}%`;
 }
 
 // ── Layout Toggle Button ──────────────────────────────────────────────────────

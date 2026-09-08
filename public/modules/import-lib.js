@@ -103,12 +103,15 @@ export async function doImport(directory) {
                setImportStatus(`Processing metadata... ${p}% (${event.done}/${event.total})`);
             } else if (event.phase === "complete") {
                resultData = event;
+               reader.cancel(); // close the SSE stream early
+               break;
             }
           } catch(e) {
              console.error("SSE parse error", e, payload);
           }
         }
       }
+      if (resultData) break;
     }
 
     if (!resultData) {

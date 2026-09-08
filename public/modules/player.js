@@ -6,6 +6,11 @@ import { render, renderGrid, renderTransport, renderQueue } from "./render.js";
 import { getVisibleTracks } from "./sort.js";
 import { selectedTrack, playlistTracks } from "./helpers.js";
 import { getStorage, setStorage } from "./storage.js";
+import { coverUrl } from "./utils.js";
+import { updateThemeColor, updateVinylArt } from "./visualizer.js";
+import { FastAverageColor } from "https://esm.sh/fast-average-color@9.4.0";
+
+const fac = new FastAverageColor();
 
 let playRequestId = 0;
 let activeDecodeController = null;
@@ -175,6 +180,16 @@ export async function playTrack(trackId, queueIds = contextQueue(trackId), reque
   state.queue = nextQueue;
   state.queueIndex = nextIndex;
   setStorage("amp-last-played", track.id);
+
+  if (track.hasArtwork) {
+    const artUrl = coverUrl(track);
+    updateVinylArt(artUrl);
+    fac.getColorAsync(artUrl)
+      .then(color => { updateThemeColor(color.hex); })
+      .catch(() => {}); // silently ignore — no artwork embedded
+  } else {
+    updateVinylArt(null); // reset to default
+  }
 
   render();
   api(`/api/recent/${encodeURIComponent(track.id)}`, { method: "POST", timeoutMs: 10_000 }).catch(() => {});
