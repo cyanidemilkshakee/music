@@ -10,17 +10,6 @@
     "test": "cd backend && cargo test",
     "bench": "cd backend && cargo bench",
     "lint": "cd backend && cargo clippy -- -D warnings",
-    "audit": "cd backend && cargo deny check",
-    "build:glass": "esbuild public/react/liquid-glass-islands.jsx --bundle --format=esm --minify --outfile=public/generated/liquid-glass-islands.js"
-  },
-  "dependencies": {
-    "liquid-glass-react": "^1.1.1",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7"
-  },
-  "devDependencies": {
-    "esbuild": "^0.28.1",
-    "eslint": "^10.6.0",
-    "prettier": "^3.9.4"
+    "audit": "cd backend && cargo deny check"
   }
 }
