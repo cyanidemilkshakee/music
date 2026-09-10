@@ -42,7 +42,8 @@ import {
 import { showCtx, closeCtx, getCtxTrackId } from "./modules/context-menu.js";
 import { trackTitle } from "./modules/utils.js";
 import { getStorage, setStorage } from "./modules/storage.js";
-import { mountLiquidGlassIslands } from "./generated/liquid-glass-islands.js";
+import { mountLiquidGlassIslands } from "./modules/liquid-glass.js";
+import { initVisualizer } from "./modules/visualizer.js";
 import "./modules/shortcuts.js";
 
 let lastTrackClick = { id: null, at: 0 };
@@ -137,6 +138,7 @@ async function clearCache() {
 
 hydrateIcons();
 mountLiquidGlassIslands();
+initVisualizer();
 loadState().catch(error => {
   reportAppError(error, "Failed to load the library.");
   toggleEmptyState();

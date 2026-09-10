@@ -1,7 +1,10 @@
 /* ── Tokens ────────────────────────────────────────────────────────────── */
 :root {
   color-scheme: dark;
-  --bg-main:     linear-gradient(135deg, #5e422b, #000000);
+  --theme-bg-1: #5e422b;
+  --theme-bg-2: #000000;
+  --theme-accent: #ffa551;
+  --bg-main:     linear-gradient(135deg, var(--theme-bg-1), var(--theme-bg-2));
   --bg-sidebar:  rgba(30, 30, 30, 0.65);
   --bg-pill:     rgba(44, 44, 46, 0.85);
   --bg-hover:    rgba(255, 255, 255, 0.1);
@@ -632,6 +635,16 @@ svg { width: 17.64px; height: 17.64px; fill: currentColor; }
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
 }
 .np-art img { width: 100%; height: 100%; object-fit: cover; transition: transform var(--spring); }
+.liquid-glass-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(125deg, rgba(255,255,255,.16), rgba(255,255,255,.035));
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+}
 .np-art:hover img { transform: scale(1.1); }
 
 .np-info-col {
@@ -1211,4 +1224,109 @@ svg { width: 17.64px; height: 17.64px; fill: currentColor; }
 
 @media (max-width: 520px) {
   .shortcut-grid { grid-template-columns: 1fr; }
+}
+/* -- Full Screen Player --------------------------------------------------- */
+.fs-player {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  background: #000;
+  transition: opacity 0.5s ease;
+  overflow: hidden;
+}
+
+.fs-player.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.fs-canvas {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100vw; height: 100vh;
+  z-index: 1;
+}
+
+.fs-ui {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 40px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.4) 0%, transparent 20%, rgba(0,0,0,0.6) 80%, rgba(0,0,0,0.9) 100%);
+}
+
+.fs-header {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.fs-close-btn {
+  width: 44px; height: 44px;
+  background: rgba(255,255,255,0.1);
+  border-radius: 50%;
+  backdrop-filter: blur(10px);
+}
+.fs-close-btn svg { width: 24px; height: 24px; }
+
+.fs-content {
+  flex: 1;
+  /* Space for the 3D Vinyl rendered in bg-canvas */
+  pointer-events: none;
+}
+
+.fs-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 800px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.fs-info {
+  text-align: left;
+}
+.fs-title {
+  font-size: 32px; font-weight: 700; color: #fff;
+  margin-bottom: 4px;
+}
+.fs-artist {
+  font-size: 20px; font-weight: 400; color: rgba(255,255,255,0.7);
+}
+
+.fs-scrubber-wrap {
+  display: flex; align-items: center; gap: 16px;
+}
+.fs-waveform {
+  flex: 1; height: 60px;
+}
+.fs-time-label {
+  font-size: 14px; font-variant-numeric: tabular-nums; color: rgba(255,255,255,0.6);
+}
+
+.fs-transport {
+  display: flex; align-items: center; justify-content: center; gap: 32px;
+  margin-top: 10px;
+}
+.fs-transport .icon-btn {
+  width: 48px; height: 48px;
+}
+.fs-transport .icon-btn svg { width: 24px; height: 24px; }
+.fs-play-btn {
+  width: 64px !important; height: 64px !important;
+  background: var(--text-base); color: #000; border-radius: 50%;
+}
+.fs-play-btn svg { width: 32px; height: 32px; }
+
+/* -- View Transitions ---------------------------------------------------- */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 0.3s;
+}
+.grid-card img {
+  view-transition-name: var(--vt-art, none);
 }
