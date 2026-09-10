@@ -5,10 +5,9 @@ use axum::{
     routing::{delete, get, patch, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::PathBuf;
 use tokio::task::spawn_blocking;
-use tokio_util::sync::CancellationToken;
 use validator::Validate;
 
 use super::AppState;
@@ -22,15 +21,15 @@ pub fn router() -> Router<AppState> {
         .route("/stats", get(get_stats))
         .route("/cache/clear", post(clear_cache))
         .route("/recent", get(get_recent))
-        .route("/recent/:id", post(add_recent))
+        .route("/recent/{id}", post(add_recent))
         .route("/scan", post(scan_directory))
-        .route("/scan/:id/stream", get(scan_stream))
-        .route("/metadata/:id", post(extract_metadata))
+        .route("/scan/{id}/stream", get(scan_stream))
+        .route("/metadata/{id}", post(extract_metadata))
         .route("/playlists", post(create_playlist))
-        .route("/playlists/:id", patch(update_playlist))
-        .route("/playlists/:id", delete(delete_playlist))
-        .route("/playlists/:id/tracks", post(add_track_to_playlist))
-        .route("/playlists/:id/tracks/:track_id", delete(remove_track_from_playlist))
+        .route("/playlists/{id}", patch(update_playlist))
+        .route("/playlists/{id}", delete(delete_playlist))
+        .route("/playlists/{id}/tracks", post(add_track_to_playlist))
+        .route("/playlists/{id}/tracks/{track_id}", delete(remove_track_from_playlist))
 }
 
 async fn get_health(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
@@ -170,7 +169,7 @@ struct ScanReq {
 }
 
 use axum::response::sse::{Event, Sse};
-use futures_util::stream::{self, Stream};
+use futures_util::stream::{self, Stream, StreamExt};
 use std::convert::Infallible;
 
 async fn scan_directory(
@@ -189,32 +188,55 @@ async fn scan_stream(
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
     let active_scan = state.scanner.get_active_scan().await;
     
-    let active = match active_scan {
-        Some(s) if s.job_id == id => s,
-        _ => {
-            return Err(AppError::Http {
-                status: StatusCode::NOT_FOUND,
-                message: "No active scan found for this Job ID.".to_string(),
-                detail: None,
-            });
-        }
-    };
+        let active = match active_scan {
+            Some(s) if s.job_id == id => s,
+            _ => {
+                return Err(AppError::Http {
+                    status: StatusCode::NOT_FOUND,
+                    message: "No active scan found for this Job ID. The scan may have already completed or the ID is invalid.".to_string(),
+                    detail: None,
+                });
+            }
+        };
 
     let rx = active.tx.subscribe();
-    
-    let stream = stream::unfold(rx, |mut rx| async move {
-        if let Ok(event) = rx.recv().await {
-            if let Ok(json) = serde_json::to_string(&event) {
-                Some((Ok(Event::default().data(json)), rx))
-            } else {
-                Some((Ok(Event::default().data("{}")), rx))
+    // Subscribe before taking the replay snapshot so an event cannot be lost
+    // between those two steps. An event in both sources is harmless to clients
+    // and is preferable to missing a terminal event.
+    let history_snapshot = active.history.lock().await.clone();
+    let history_has_terminal_event = history_snapshot.iter().any(|event| {
+        matches!(event, crate::services::scanner::ScanEvent::Complete(_) | crate::services::scanner::ScanEvent::Failed { .. })
+    });
+
+    // Build a stream that first replays all past events, then follows live ones
+    let history_stream = stream::iter(history_snapshot)
+        .map(|event| {
+            let json = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
+            Ok::<_, Infallible>(Event::default().data(json))
+        });
+
+    let live_stream = stream::unfold(Some(rx), |rx| async move {
+        let mut rx = rx?;
+        match rx.recv().await {
+            Ok(event) => {
+                let json = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
+                let finished = matches!(event, crate::services::scanner::ScanEvent::Complete(_) | crate::services::scanner::ScanEvent::Failed { .. });
+                Some((Ok(Event::default().data(json)), (!finished).then_some(rx)))
             }
-        } else {
-            None // Channel closed or lagged
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                // Skip lagged messages and continue
+                Some((Ok(Event::default().data("{}")), Some(rx)))
+            }
         }
     });
 
-    Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::new()))
+    let combined = if history_has_terminal_event {
+        history_stream.chain(stream::empty()).boxed()
+    } else {
+        history_stream.chain(live_stream).boxed()
+    };
+    Ok(Sse::new(combined).keep_alive(axum::response::sse::KeepAlive::new()))
 }
 
 async fn extract_metadata(

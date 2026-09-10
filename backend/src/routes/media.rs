@@ -7,9 +7,9 @@ use axum::{
     Json, Router,
 };
 use sha1_smol::Sha1;
-use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::fs::{self, File};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::task::spawn_blocking;
 use tokio_util::io::ReaderStream;
@@ -20,11 +20,11 @@ use crate::error::AppError;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/decode/:id", post(decode_track))
-        .route("/stream/:id", get(stream_track))
-        .route("/audio/:id", get(send_audio).head(send_audio))
-        .route("/cache/:id", get(check_cache))
-        .route("/artwork/:id", get(send_artwork))
+        .route("/decode/{id}", post(decode_track))
+        .route("/stream/{id}", get(stream_track))
+        .route("/audio/{id}", get(send_audio).head(send_audio))
+        .route("/cache/{id}", get(check_cache))
+        .route("/artwork/{id}", get(send_artwork))
 }
 
 fn valid_id(id: &str) -> Result<String, AppError> {
@@ -65,6 +65,15 @@ async fn decode_track(
 ) -> Result<impl IntoResponse, AppError> {
     let id = valid_id(&id)?;
     let track = get_track_or_throw(&state, &id).await?;
+
+    if state.config.low_latency_streaming {
+        return Ok(Json(serde_json::json!({
+            "id": track.id,
+            "audioUrl": format!("/api/stream/{}", urlencoding::encode(&track.id)),
+            "streaming": true
+        })));
+    }
+
     let decoded_path = state.ffmpeg.ensure_decoded(&track).await?;
 
     let file_name = decoded_path.file_name().unwrap_or_default().to_string_lossy();
@@ -117,12 +126,15 @@ async fn stream_track(
     let mut child = Command::new(&state.config.ffmpeg_path)
         .args([
             "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-i", &track.path,
+            "-i"
+        ])
+        .arg(crate::services::ffmpeg::FfmpegService::path_to_ffmpeg_input(&track.path))
+        .args([
             "-map", "0:a:0", "-vn", "-map_metadata", "0",
             "-codec:a", "libmp3lame", "-q:a", "3", "-f", "mp3", "pipe:1"
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| AppError::Media {
@@ -136,7 +148,12 @@ async fn stream_track(
         exit_code: None,
         stderr: String::new(),
     })?;
-    // stderr could be logged, but skipping for simplicity as stream handles it transparently
+    // Keep the child alive after this handler returns. The response body owns
+    // stdout, but not the process itself; dropping the child here would kill
+    // FFmpeg before the browser can consume its output.
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
     
     let stream = ReaderStream::new(stdout);
     let body = Body::from_stream(stream);
@@ -145,8 +162,6 @@ async fn stream_track(
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/mpeg"));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert("X-Accel-Buffering", HeaderValue::from_static("no"));
-
-    // We don't await the child exit here; axum handles streaming the body and drop kills it.
 
     Ok((StatusCode::OK, headers, body))
 }
@@ -328,12 +343,15 @@ async fn send_artwork(
     let mut child = Command::new(&state.config.ffmpeg_path)
         .args([
             "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-i", &track.path,
+            "-i"
+        ])
+        .arg(crate::services::ffmpeg::FfmpegService::path_to_ffmpeg_input(&track.path))
+        .args([
             "-an", "-map", "0:v:0", "-frames:v", "1", "-vcodec", "mjpeg",
             "-f", "image2pipe", "pipe:1"
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| AppError::Media {
@@ -347,6 +365,9 @@ async fn send_artwork(
         exit_code: None,
         stderr: String::new(),
     })?;
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
     let stream = ReaderStream::new(stdout);
     let body = Body::from_stream(stream);
 

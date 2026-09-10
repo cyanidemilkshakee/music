@@ -6,13 +6,12 @@ static METRICS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
 pub fn install() {
     let builder = PrometheusBuilder::new();
-    let handle = builder
-        .install_recorder()
-        .expect("Failed to install Prometheus recorder");
-    let _ = METRICS_HANDLE.set(handle);
+    if let Ok(handle) = builder.install_recorder() {
+        let _ = METRICS_HANDLE.set(handle);
+    }
 }
 
-pub fn router() -> Router {
+pub fn router() -> Router<crate::routes::AppState> {
     Router::new().route("/", get(metrics_handler))
 }
 

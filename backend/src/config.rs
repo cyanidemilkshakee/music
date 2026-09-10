@@ -10,7 +10,6 @@ pub struct Config {
     pub transcode_concurrency: NonZeroUsize,  // 1..=8
     pub max_scan_files: NonZeroUsize,         // 1..=1_000_000
     pub max_scan_failures: NonZeroUsize,      // 1..=100_000
-    pub request_timeout_ms: u64,             // 1_000..=3_600_000
     pub json_limit_bytes: usize,             // parsed "2mb" -> bytes
     pub ffmpeg_path: PathBuf,
     pub ffprobe_path: PathBuf,
@@ -18,8 +17,6 @@ pub struct Config {
     pub ffmpeg_timeout_ms: u64,              // 1_000..=3_600_000
     pub data_dir: PathBuf,
     pub low_latency_streaming: bool,
-    pub health_cache_ttl_ms: u64,            // default 10_000
-    pub state_cache_ttl_ms: u64,             // default 500
     pub max_concurrent_requests: usize,      // default 512
 }
 
@@ -36,18 +33,21 @@ impl Config {
             });
 
         let host = std::env::var("HOST")
-            .unwrap_or_else(|_| "0.0.0.0".to_string())
+            .unwrap_or_else(|_| "127.0.0.1".to_string())
             .parse::<IpAddr>()
             .unwrap_or_else(|_| {
-                errors.push("HOST must be a valid IP address (e.g. 0.0.0.0 or 127.0.0.1)".to_string());
-                std::net::IpAddr::V4(std::net::Ipv4Addr::new(0,0,0,0))
+                errors.push("HOST must be a valid IP address (e.g. 127.0.0.1)".to_string());
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(127,0,0,1))
             });
+
+        if !host.is_loopback() {
+            errors.push("HOST must be a loopback address (127.0.0.1 or ::1); Local Amp does not expose its library over the network.".to_string());
+        }
             
         let scan_concurrency = Self::parse_nonzero("SCAN_CONCURRENCY", 4, 1, 32, &mut errors);
         let transcode_concurrency = Self::parse_nonzero("TRANSCODE_CONCURRENCY", 2, 1, 8, &mut errors);
         let max_scan_files = Self::parse_nonzero("MAX_SCAN_FILES", 100_000, 1, 1_000_000, &mut errors);
         let max_scan_failures = Self::parse_nonzero("MAX_SCAN_FAILURES", 10_000, 1, 100_000, &mut errors);
-        let request_timeout_ms = Self::parse_u64("REQUEST_TIMEOUT_MS", 30_000, 1_000, 3_600_000, &mut errors);
         
         let json_limit_bytes = match std::env::var("JSON_LIMIT") {
             Ok(v) => match v.to_lowercase().as_str() {
@@ -83,8 +83,6 @@ impl Config {
             Err(_) => true,
         };
         
-        let health_cache_ttl_ms = Self::parse_u64("HEALTH_CACHE_TTL_MS", 10_000, 1, 3_600_000, &mut errors);
-        let state_cache_ttl_ms = Self::parse_u64("STATE_CACHE_TTL_MS", 500, 0, 3_600_000, &mut errors);
         let max_concurrent_requests = Self::parse_usize("MAX_CONCURRENT_REQUESTS", 512, 1, 10_000, &mut errors);
 
         if errors.is_empty() {
@@ -95,7 +93,6 @@ impl Config {
                 transcode_concurrency,
                 max_scan_files,
                 max_scan_failures,
-                request_timeout_ms,
                 json_limit_bytes,
                 ffmpeg_path,
                 ffprobe_path,
@@ -103,8 +100,6 @@ impl Config {
                 ffmpeg_timeout_ms,
                 data_dir,
                 low_latency_streaming,
-                health_cache_ttl_ms,
-                state_cache_ttl_ms,
                 max_concurrent_requests,
             })
         } else {

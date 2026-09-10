@@ -5,14 +5,12 @@ use axum::{
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
+use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{
     compression::CompressionLayer,
     services::{ServeDir, ServeFile},
     limit::RequestBodyLimitLayer,
-    cors::{CorsLayer, Any},
-    timeout::TimeoutLayer,
 };
-use std::time::Duration;
 use tracing::{info, Level};
 use tracing_subscriber::{FmtSubscriber, EnvFilter};
 
@@ -59,7 +57,8 @@ async fn main() -> anyhow::Result<()> {
     let db_path = config.data_dir.join("local-amp.db");
 
     let pool = db::pool::build_pool(&db_path)?;
-    db::migrations::run_migrations(&mut pool.get()?)?;
+    let mut conn = pool.get()?;
+    db::migrations::run_migrations(&mut conn)?;
 
     let ffmpeg = FfmpegService::new(config.clone());
     let scanner = Arc::new(ScannerService::new(config.clone(), ffmpeg.clone(), pool.clone()));
@@ -83,11 +82,13 @@ async fn main() -> anyhow::Result<()> {
         .nest("/metrics", metrics::router())
         .fallback_service(serve_dir)
         .with_state(app_state)
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
-        .layer(TimeoutLayer::new(Duration::from_millis(config.request_timeout_ms)))
+        // Streaming playback and scan progress may legitimately outlive a normal
+        // request timeout. The FFmpeg and ffprobe operations enforce their own
+        // bounded timeouts, while this layer protects server capacity.
+        .layer(ConcurrencyLimitLayer::new(config.max_concurrent_requests))
         .layer(axum_middleware::from_fn(middleware::compression_bypass_middleware))
         .layer(CompressionLayer::new())
-        .layer(RequestBodyLimitLayer::new(config.json_limit))
+        .layer(RequestBodyLimitLayer::new(config.json_limit_bytes))
         .layer(axum_middleware::from_fn(middleware::security_headers_middleware))
         .layer(axum_middleware::from_fn(middleware::request_id_middleware));
 
@@ -106,7 +107,7 @@ async fn shutdown_signal() {
     let ctrl_c = async {
         signal::ctrl_c()
             .await
-            .unwrap_or_else(|_| ());
+            .unwrap_or(());
     };
 
     #[cfg(unix)]

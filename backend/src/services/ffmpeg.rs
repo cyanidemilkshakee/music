@@ -1,20 +1,18 @@
 use crate::config::Config;
 use crate::db::Track;
 use crate::error::AppError;
-use anyhow::{anyhow, Context};
-use futures_util::TryStreamExt;
+use anyhow::anyhow;
 use sha1_smol::Sha1;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tokio::fs;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tokio::time::{timeout, Duration};
-use tracing::{error, warn};
 
+#[allow(dead_code)]
 pub static FFMPEG_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
@@ -29,6 +27,16 @@ impl FfmpegService {
             transcode_semaphore: Arc::new(Semaphore::new(config.transcode_concurrency.get())),
             config,
         }
+    }
+
+    /// Convert a file path to an ffmpeg input string.
+    /// Strips the Windows \\?\ extended-length prefix and uses the `file:` protocol
+    /// so ffmpeg doesn't misinterpret special characters like `[` `]` as glob patterns.
+    pub fn path_to_ffmpeg_input(path: &str) -> String {
+        let stripped = path.strip_prefix(r"\\?\").unwrap_or(path);
+        // Backslashes must be forward-slashes in file: URIs
+        let forward = stripped.replace('\\', "/");
+        format!("file:{}", forward)
     }
 
     pub fn cache_path_for_track(&self, track: &Track) -> Result<PathBuf, AppError> {
@@ -50,7 +58,7 @@ impl FfmpegService {
         
         // Path traversal guard
         let cache_dir = self.config.data_dir.join("cache");
-        let cache_dir_abs = std::fs::canonicalize(&cache_dir).unwrap_or(cache_dir);
+        let _cache_dir_abs = std::fs::canonicalize(&cache_dir).unwrap_or(cache_dir);
         // We can't canonicalize cache_path because it might not exist yet, 
         // but joining file_name onto cache_dir is safe since file_name contains no slashes.
         
@@ -67,6 +75,7 @@ impl FfmpegService {
     pub async fn probe_track_metadata(&self, file_path: &Path) -> Result<serde_json::Value, AppError> {
         let start = std::time::Instant::now();
         let mut retry = false;
+        let input_uri = Self::path_to_ffmpeg_input(&file_path.to_string_lossy());
         loop {
             let output_res = timeout(
                 Duration::from_millis(self.config.ffprobe_timeout_ms),
@@ -77,7 +86,7 @@ impl FfmpegService {
                         "-show_format", 
                         "-show_streams", 
                     ])
-                    .arg(file_path)
+                    .arg(&input_uri)
                     .kill_on_drop(true)
                     .output()
             ).await;
@@ -145,7 +154,7 @@ impl FfmpegService {
         fs::create_dir_all(&temp_dir).await?;
         
         // Use tempfile in same dir to guarantee atomic rename
-        let mut temp_file = NamedTempFile::new_in(&temp_dir)?;
+        let temp_file = NamedTempFile::new_in(&temp_dir)?;
         let temp_path = temp_file.path().to_path_buf();
 
         let output_res = timeout(
@@ -155,9 +164,9 @@ impl FfmpegService {
                     "-hide_banner", "-loglevel", "error", "-nostdin", "-y", 
                     "-i"
                 ])
-                .arg(&track.path)
+                .arg(Self::path_to_ffmpeg_input(&track.path))
                 .args([
-                    "-vn", "-map_metadata", "0", "-codec:a", "libmp3lame", "-q:a", "2"
+                    "-vn", "-map_metadata", "0", "-codec:a", "libmp3lame", "-q:a", "2", "-f", "mp3"
                 ])
                 .arg(&temp_path)
                 .kill_on_drop(true)
@@ -210,7 +219,7 @@ impl FfmpegService {
             let name = entry.file_name().to_string_lossy().to_lowercase();
             if name.ends_with(".mp3") || name.ends_with(".tmp.mp3") {
                 if let Ok(meta) = fs::metadata(&path).await {
-                    if let Ok(_) = fs::remove_file(&path).await {
+                    if fs::remove_file(&path).await.is_ok() {
                         removed += 1;
                         bytes += meta.len();
                     }

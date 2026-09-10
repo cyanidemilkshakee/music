@@ -27,6 +27,7 @@ pub enum AppError {
         stderr: String,
     },
     #[error("Media tool unavailable")]
+    #[allow(dead_code)]
     MediaUnavailable,
     #[error("Invalid request body")]
     Json(#[from] serde_json::Error),
@@ -57,6 +58,9 @@ impl IntoResponse for AppError {
             }
             AppError::Timeout(_) => {
                 (StatusCode::REQUEST_TIMEOUT, "Request timed out".to_string(), None)
+            }
+            AppError::Io(ref e) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "I/O Error".to_string(), Some(e.to_string()))
             }
             // For all other errors, we return a 500 and log the error.
             _ => {

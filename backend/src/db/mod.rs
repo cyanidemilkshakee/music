@@ -2,7 +2,7 @@ pub mod pool;
 pub mod migrations;
 
 use crate::error::AppError;
-use rusqlite::{params, Connection, Row, Transaction};
+use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 
 // Models
@@ -263,7 +263,7 @@ pub fn create_playlist(conn: &mut Connection, mut playlist: Playlist) -> Result<
     // fetch hydrated
     let playlist_id = playlist.id.clone();
     get_playlist_by_id(conn, &playlist_id).and_then(|opt| {
-        opt.ok_or_else(|| AppError::Database("Failed to retrieve created playlist".to_string()))
+        opt.ok_or_else(|| anyhow::anyhow!("Failed to retrieve created playlist").into())
     })
 }
 
@@ -311,6 +311,8 @@ pub fn add_track_to_playlist(conn: &mut Connection, playlist_id: &str, track_id:
             params![chrono::Utc::now().to_rfc3339(), playlist_id],
         )?;
     }
+    drop(check_p);
+    drop(check_t);
     
     tx.commit()?;
     get_playlist_by_id(conn, playlist_id)
@@ -358,6 +360,7 @@ pub fn add_recent(conn: &mut Connection, track_id: &str) -> Result<bool, AppErro
         "DELETE FROM recent WHERE id IN (SELECT id FROM recent ORDER BY playedAt DESC LIMIT -1 OFFSET 50)",
         [],
     )?;
+    drop(check_t);
     tx.commit()?;
     Ok(true)
 }
@@ -427,6 +430,7 @@ pub fn get_health(conn: &Connection) -> Result<Health, AppError> {
     })
 }
 
+#[allow(dead_code)]
 pub fn close_db(conn: &Connection) -> Result<(), AppError> {
     conn.execute_batch("
         PRAGMA optimize;
