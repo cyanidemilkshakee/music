@@ -1,57 +1,83 @@
 # Local Amp
 
-Local Amp is a local-only music player inspired by compact album-art-first players. It uses:
+Local Amp is a local-only music player for browsing, organizing, and playing a folder of audio files. The Rust backend indexes metadata with `ffprobe`, stores the library and playlists in SQLite, and serves a browser-based player.
 
-- `ffprobe` to extract audio metadata.
-- `ffmpeg` to stream-decode local tracks with low startup latency.
-- Roboto from `public/assets/fonts/Roboto-Regular.ttf`.
-- SQLite in `data/local-amp.db` for the local library, playlists, and recent plays.
-- A high-performance Rust backend (`axum` + `tokio`).
+The application does not use runtime CDN assets or send library data to an external service.
 
-## Prerequisites
+## Requirements
 
-- **FFmpeg & FFprobe**: Must be installed and available in your `PATH` or configured via `.env`.
-- **Rust**: Ensure you have the Rust toolchain installed.
-- **Windows Users**: You must have the **MSVC C++ Build Tools** installed (specifically the desktop C++ workload) for the Rust backend to compile successfully natively.
+- Rust (the stable toolchain)
+- FFmpeg and FFprobe available on `PATH`, or paths configured in `.env`
+- Node.js and npm to use the convenience scripts
+- On Windows, the MSVC C++ Build Tools with the Desktop development with C++ workload
+
+## Setup
+
+Optional configuration starts from the provided example:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Start the player:
+
+```powershell
+npm start
+```
+
+Open [http://localhost:1111](http://localhost:1111).
+
+You can also start the backend directly:
+
+```powershell
+Set-Location backend
+cargo run --release
+```
+
+## Local-only behavior
+
+Local Amp listens on `127.0.0.1` by default. The `HOST` value must be a loopback address such as `127.0.0.1` or `::1`; network-facing addresses are rejected. This protects the API, which has access to local library paths and playlist data.
 
 ## Configuration
 
-We use environment variables for configuration. Copy the example file and modify as needed:
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `1111` | Local HTTP port. |
+| `HOST` | `127.0.0.1` | Loopback address used by the server. |
+| `DATA_DIR` | `data` | SQLite database and decoded-audio cache location. |
+| `FFMPEG_PATH` | `ffmpeg` | FFmpeg executable or absolute path. |
+| `FFPROBE_PATH` | `ffprobe` | FFprobe executable or absolute path. |
+| `LOW_LATENCY_STREAMING` | `true` | Stream a track through FFmpeg as it plays. Set to `false` to decode the full track into the local cache first. |
+| `SCAN_CONCURRENCY` | `4` | Maximum simultaneous metadata probes during import. |
+| `TRANSCODE_CONCURRENCY` | `2` | Maximum simultaneous full-track decodes. |
+| `MAX_SCAN_FILES` | `100000` | Upper limit on audio files considered in one import. |
+| `MAX_SCAN_FAILURES` | `10000` | Upper limit on individual import failures retained for reporting. |
+| `FFPROBE_TIMEOUT_MS` | `10000` | Per-file metadata probe timeout. |
+| `FFMPEG_TIMEOUT_MS` | `3600000` | Full decode timeout. |
+| `JSON_LIMIT` | `2mb` | Maximum JSON request-body size. Allowed values: `1mb`, `2mb`, `5mb`, and `10mb`. |
+| `MAX_CONCURRENT_REQUESTS` | `512` | Maximum active server requests. |
+
+## Using the player
+
+1. Open the import sheet and enter an absolute path to a music folder.
+2. Select **Import Folder**. Import progress is streamed to the interface.
+3. Choose a track to play it. With the default streaming mode, playback can begin before the full track is transcoded.
+4. Use the sidebar to create playlists and the track context menu to add tracks or refresh metadata.
+
+Imports report a terminal error when a folder cannot be opened, rather than leaving the interface waiting for progress.
+
+## Development and verification
+
 ```powershell
-cp .env.example .env
-```
-*Note: You can tune concurrency limits, ports, and FFmpeg paths in this file.*
-
-## Run
-
-```powershell
-npm install
-npm start
+npm test
+npm run lint
+npm run build
 ```
 
-Then open:
-
-```text
-http://localhost:1111
-```
-
-The server defaults to port `1111`.
-
-Playback defaults to low-latency FFmpeg streaming, so a track can start before the whole file is transcoded. To force the older full decode-to-cache path, edit your `.env` or set the variable inline:
-
-```powershell
-$env:LOW_LATENCY_STREAMING="false"
-npm start
-```
-
-## Use
-
-1. Enter a local music folder path.
-2. Click `Import Folder`.
-3. Select or play a track.
-4. Create playlists from the sidebar plus button.
-5. Right-click a track and choose `Refresh Metadata` to refresh its tags.
+`npm test` runs the backend integration suite using isolated ports and temporary database directories. `npm run lint` runs Clippy with warnings treated as errors.
 
 ## Troubleshooting
 
-If import shows `0 tracks imported` and many skipped files, the status line now shows the first `ffprobe` error. The most common cause is a server process started from a restricted environment; close it and run `npm start` from a normal PowerShell window.
+If the health endpoint reports FFmpeg or FFprobe as unavailable, install FFmpeg and ensure both commands work from the same PowerShell session that starts Local Amp. You can also set `FFMPEG_PATH` and `FFPROBE_PATH` to absolute executable paths in `.env`.
+
+If an import reports skipped tracks, the first metadata or filesystem error is shown in the import status. Confirm that the folder exists, is readable by the account running Local Amp, and contains supported audio files.
