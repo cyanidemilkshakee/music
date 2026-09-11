@@ -1,273 +1,165 @@
 import { el } from "./dom.js";
-import { state } from "./state.js";
-import * as THREE from 'https://esm.sh/three@0.160.0';
 
-// Web Audio API globals
-let audioCtx;
+let audioContext;
 let analyser;
 let source;
-let dataArray;
-let bufferLength;
-
-// Theming globals
-let currentThemeColor = '#ffa551';
-let currentColorVec3 = new THREE.Vector3(1.0, 0.65, 0.32);
-
-// Three.js globals
-let scene, camera, renderer;
-let shaderMaterial, vinylMesh, vinylMaterial;
-
-// Render loop flags
-let isVisualizerRunning = false;
+let frequencies;
+let currentThemeColor = "#ffa551";
+let artwork = null;
+let rotation = 0;
+let running = false;
 
 export function initVisualizer() {
-  // Bind Full Screen Events
-  if (el.fsExpandBtn) {
-    el.fsExpandBtn.addEventListener('click', openFullScreen);
-  }
-  if (el.fsCloseBtn) {
-    el.fsCloseBtn.addEventListener('click', closeFullScreen);
-  }
-
-  // Setup Web Audio on first play
-  el.audio.addEventListener('play', () => {
-    initAudioContext();
-  });
-
-  // Init Three.js
-  initThreeJS();
-
-  // Start Animation Loop
-  if (!isVisualizerRunning) {
-    isVisualizerRunning = true;
+  el.fsExpandBtn?.addEventListener("click", openFullScreen);
+  el.fsCloseBtn?.addEventListener("click", closeFullScreen);
+  el.audio.addEventListener("play", initAudioContext, { once: true });
+  window.addEventListener("resize", resizeBackground);
+  resizeBackground();
+  if (!running) {
+    running = true;
     requestAnimationFrame(renderLoop);
   }
 }
 
 function initAudioContext() {
-  if (audioCtx) {
-    if (audioCtx.state === 'suspended') {
-      audioCtx.resume();
-    }
+  if (audioContext) {
+    if (audioContext.state === "suspended") audioContext.resume();
     return;
   }
-  
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  analyser = audioCtx.createAnalyser();
-  
-  // Connect audio element
-  source = audioCtx.createMediaElementSource(el.audio);
-  source.connect(analyser);
-  analyser.connect(audioCtx.destination);
-  
+  audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioContext.createAnalyser();
   analyser.fftSize = 256;
-  bufferLength = analyser.frequencyBinCount;
-  dataArray = new Uint8Array(bufferLength);
+  frequencies = new Uint8Array(analyser.frequencyBinCount);
+  source = audioContext.createMediaElementSource(el.audio);
+  source.connect(analyser);
+  analyser.connect(audioContext.destination);
 }
 
 export function updateThemeColor(hex) {
   currentThemeColor = hex;
-  const color = new THREE.Color(hex);
-  currentColorVec3.set(color.r, color.g, color.b);
-  if (shaderMaterial) {
-    shaderMaterial.uniforms.u_color.value = currentColorVec3;
-  }
-  document.documentElement.style.setProperty('--theme-accent', hex);
-  document.documentElement.style.setProperty('--theme-bg-1', hex);
+  document.documentElement.style.setProperty("--theme-accent", hex);
+  document.documentElement.style.setProperty("--theme-bg-1", hex);
 }
 
 export function updateVinylArt(url) {
-  if (vinylMaterial && url) {
-    new THREE.TextureLoader().load(url, (texture) => {
-      vinylMaterial.map = texture;
-      vinylMaterial.needsUpdate = true;
-    });
+  if (!url) {
+    artwork = null;
+    return;
   }
+  const image = new Image();
+  image.decoding = "async";
+  image.onload = () => { artwork = image; };
+  image.onerror = () => { artwork = null; };
+  image.src = url;
 }
 
-function initThreeJS() {
-  if (!el.bgCanvas) return;
+function resizeBackground() {
+  const canvas = el.bgCanvas;
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(window.innerWidth * dpr);
+  canvas.height = Math.round(window.innerHeight * dpr);
+  canvas.style.width = `${window.innerWidth}px`;
+  canvas.style.height = `${window.innerHeight}px`;
+}
 
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-  camera.position.z = 5;
+function energy() {
+  if (!analyser || !frequencies) return 0;
+  analyser.getByteFrequencyData(frequencies);
+  let total = 0;
+  for (let index = 0; index < 12; index += 1) total += frequencies[index];
+  return total / (12 * 255);
+}
 
-  renderer = new THREE.WebGLRenderer({ canvas: el.bgCanvas, alpha: true, antialias: true });
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(window.devicePixelRatio);
+function drawBackground(pulse) {
+  const canvas = el.bgCanvas;
+  if (!canvas) return;
+  const context = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.width / dpr;
+  const height = canvas.height / dpr;
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.clearRect(0, 0, width, height);
 
-  // 1. Liquid Shader Background (FullScreen)
-  const planeGeo = new THREE.PlaneGeometry(20, 20, 32, 32);
-  
-  const vertexShader = `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `;
-  
-  const fragmentShader = `
-    uniform float u_time;
-    uniform vec3 u_color;
-    varying vec2 vUv;
+  const gradient = context.createRadialGradient(width * .5, height * .42, Math.min(width, height) * .04, width * .5, height * .42, Math.max(width, height) * (.66 + pulse * .08));
+  gradient.addColorStop(0, currentThemeColor);
+  gradient.addColorStop(.32, "#171724");
+  gradient.addColorStop(1, "#050508");
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, width, height);
 
-    vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-    vec2 mod289(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-    vec3 permute(vec3 x) { return mod289(((x*34.0)+1.0)*x); }
-
-    float snoise(vec2 v) {
-      const vec4 C = vec4(0.211324865405187,  0.366025403784439, -0.577350269189626,  0.024390243902439);
-      vec2 i  = floor(v + dot(v, C.yy) );
-      vec2 x0 = v -   i + dot(i, C.xx);
-      vec2 i1;
-      i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
-      vec4 x12 = x0.xyxy + C.xxzz;
-      x12.xy -= i1;
-      i = mod289(i);
-      vec3 p = permute( permute( i.y + vec3(0.0, i1.y, 1.0 )) + i.x + vec3(0.0, i1.x, 1.0 ));
-      vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
-      m = m*m ; m = m*m ;
-      vec3 x = 2.0 * fract(p * C.www) - 1.0;
-      vec3 h = abs(x) - 0.5;
-      vec3 ox = floor(x + 0.5);
-      vec3 a0 = x - ox;
-      m *= 1.79284291400159 - 0.85373472095314 * ( a0*a0 + h*h );
-      vec3 g;
-      g.x  = a0.x  * x0.x  + h.x  * x0.y;
-      g.yz = a0.yz * x12.xz + h.yz * x12.yw;
-      return 130.0 * dot(m, g);
-    }
-
-    void main() {
-      vec2 uv = vUv;
-      float noise = snoise(uv * 3.0 + u_time * 0.2);
-      float noise2 = snoise(uv * 2.0 - u_time * 0.1);
-      
-      vec3 baseColor = vec3(0.05, 0.05, 0.08);
-      vec3 highlight = u_color;
-      
-      float mixFactor = (noise + noise2) * 0.5 + 0.5;
-      vec3 finalColor = mix(baseColor, highlight * 0.8, mixFactor);
-      
-      gl_FragColor = vec4(finalColor, 1.0);
-    }
-  `;
-
-  shaderMaterial = new THREE.ShaderMaterial({
-    vertexShader,
-    fragmentShader,
-    uniforms: {
-      u_time: { value: 0 },
-      u_color: { value: currentColorVec3 }
-    }
-  });
-
-  const bgMesh = new THREE.Mesh(planeGeo, shaderMaterial);
-  bgMesh.position.z = -5;
-  scene.add(bgMesh);
-
-  // 2. The 3D Vinyl Record
-  const vinylGeo = new THREE.CylinderGeometry(2, 2, 0.05, 64);
-  
-  vinylMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5 });
-  const blackVinylMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.3 });
-  
-  const materials = [
-    blackVinylMat, 
-    vinylMaterial, 
-    blackVinylMat  
-  ];
-
-  vinylMesh = new THREE.Mesh(vinylGeo, materials);
-  vinylMesh.rotation.x = Math.PI / 2.5; // Tilt it forward
-  scene.add(vinylMesh);
-
-  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-  scene.add(ambientLight);
-  const pointLight = new THREE.PointLight(0xffffff, 2, 100);
-  pointLight.position.set(2, 3, 4);
-  scene.add(pointLight);
-
-  window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  });
+  const radius = Math.min(width, height) * (.22 + pulse * .035);
+  context.save();
+  context.translate(width / 2, height * .42);
+  context.rotate(rotation);
+  context.fillStyle = "#09090b";
+  context.beginPath();
+  context.arc(0, 0, radius, 0, Math.PI * 2);
+  context.fill();
+  context.strokeStyle = "rgba(255,255,255,.16)";
+  context.lineWidth = 1;
+  for (let ratio = .2; ratio < .95; ratio += .13) {
+    context.beginPath();
+    context.arc(0, 0, radius * ratio, 0, Math.PI * 2);
+    context.stroke();
+  }
+  context.save();
+  context.beginPath();
+  context.arc(0, 0, radius * .52, 0, Math.PI * 2);
+  context.clip();
+  if (artwork) {
+    const size = radius * 1.04;
+    context.drawImage(artwork, -size / 2, -size / 2, size, size);
+  } else {
+    context.fillStyle = currentThemeColor;
+    context.fill();
+  }
+  context.restore();
+  context.fillStyle = "#e9e9ef";
+  context.beginPath();
+  context.arc(0, 0, radius * .06, 0, Math.PI * 2);
+  context.fill();
+  context.restore();
 }
 
 function drawWaveform(canvas, color) {
-  if (!canvas || !analyser) return;
-  const ctx = canvas.getContext('2d');
+  if (!canvas || !frequencies) return;
   const rect = canvas.getBoundingClientRect();
-  
-  // Skip if hidden
-  if (rect.width === 0 || rect.height === 0) return;
-
+  if (!rect.width || !rect.height) return;
   const dpr = window.devicePixelRatio || 1;
-  if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
+  if (canvas.width !== Math.round(rect.width * dpr) || canvas.height !== Math.round(rect.height * dpr)) {
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
   }
-
-  ctx.save();
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, rect.width, rect.height);
-  
-  const barWidth = (rect.width / bufferLength) * 2.5;
-  let barHeight;
-  let x = 0;
-
-  for (let i = 0; i < bufferLength; i++) {
-    barHeight = (dataArray[i] / 255) * rect.height;
-    ctx.fillStyle = color;
-    ctx.fillRect(x, rect.height - barHeight, barWidth, barHeight);
-    x += barWidth + 1;
+  const context = canvas.getContext("2d");
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.clearRect(0, 0, rect.width, rect.height);
+  const barWidth = rect.width / frequencies.length;
+  context.fillStyle = color;
+  for (let index = 0; index < frequencies.length; index += 1) {
+    const barHeight = Math.max(2, (frequencies[index] / 255) * rect.height);
+    context.fillRect(index * barWidth, rect.height - barHeight, Math.max(1, barWidth - 1), barHeight);
   }
-  ctx.restore();
 }
 
-function renderLoop(time) {
+function renderLoop() {
   requestAnimationFrame(renderLoop);
-  
-  if (shaderMaterial) {
-    shaderMaterial.uniforms.u_time.value = time * 0.001;
-  }
-
-  let bassPulse = 0;
-  if (analyser) {
-    analyser.getByteFrequencyData(dataArray);
-    let sum = 0;
-    for(let i=0; i<10; i++) sum += dataArray[i];
-    bassPulse = sum / 10 / 255; 
-  }
-
-  if (vinylMesh) {
-    if (!el.audio.paused) {
-      vinylMesh.rotation.y -= 0.01 + (bassPulse * 0.02);
-    }
-    vinylMesh.scale.set(1 + bassPulse * 0.05, 1, 1 + bassPulse * 0.05);
-  }
-
-  if (renderer && scene && camera) {
-    renderer.render(scene, camera);
-  }
-
+  const pulse = energy();
+  if (!el.audio.paused) rotation += .01 + pulse * .02;
+  drawBackground(pulse);
   if (!el.audio.paused) {
     drawWaveform(el.waveformCanvas, currentThemeColor);
-    drawWaveform(el.fsWaveformCanvas, '#ffffff');
+    drawWaveform(el.fsWaveformCanvas, "#ffffff");
   }
 }
 
 function openFullScreen() {
-  if (el.fullScreenPlayer) {
-    el.fullScreenPlayer.classList.remove('is-hidden');
-    window.dispatchEvent(new Event('resize'));
-  }
+  el.fullScreenPlayer?.classList.remove("is-hidden");
+  el.fullScreenPlayer?.setAttribute("aria-hidden", "false");
+  resizeBackground();
 }
 
 function closeFullScreen() {
-  if (el.fullScreenPlayer) {
-    el.fullScreenPlayer.classList.add('is-hidden');
-  }
+  el.fullScreenPlayer?.classList.add("is-hidden");
+  el.fullScreenPlayer?.setAttribute("aria-hidden", "true");
 }
