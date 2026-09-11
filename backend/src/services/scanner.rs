@@ -2,26 +2,29 @@ use crate::config::Config;
 use crate::db::{self, Track};
 use crate::error::AppError;
 use crate::services::ffmpeg::FfmpegService;
-use anyhow::{anyhow, Context};
-use futures_util::StreamExt;
+use anyhow::anyhow;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use sha1_smol::Sha1;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::broadcast;
 use tokio::task::spawn_blocking;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use std::sync::atomic::{AtomicBool, Ordering};
+
 
 #[derive(Clone)]
 pub struct ActiveScan {
     pub job_id: String,
     pub tx: broadcast::Sender<ScanEvent>,
+    /// All events emitted so far — new SSE subscribers replay these first.
+    pub history: Arc<tokio::sync::Mutex<Vec<ScanEvent>>>,
+    pub is_done: Arc<AtomicBool>,
+    #[allow(dead_code)]
     pub cancel: CancellationToken,
 }
 
@@ -46,6 +49,7 @@ pub enum ScanEvent {
     Walk { found: usize },
     Probe { done: usize, total: usize, errors: usize },
     Complete(ScanResult),
+    Failed { message: String },
 }
 
 fn hash_id(val: &str) -> String {
@@ -174,30 +178,45 @@ impl ScannerService {
         directory: PathBuf,
     ) -> Result<String, AppError> {
         let mut lock = self.active_scan.lock().await;
-        if lock.is_some() {
-            return Err(AppError::Http {
-                status: axum::http::StatusCode::CONFLICT,
-                message: "A library scan is already running.".to_string(),
-                detail: None,
-            });
+        if let Some(active) = &*lock {
+            if !active.is_done.load(Ordering::SeqCst) {
+                return Err(AppError::Http {
+                    status: axum::http::StatusCode::CONFLICT,
+                    message: "A library scan is already running.".to_string(),
+                    detail: None,
+                });
+            }
         }
 
         let job_id = uuid::Uuid::new_v4().to_string();
-        let (tx, _) = broadcast::channel(100);
+        let (tx, _rx_keep_alive) = broadcast::channel(512);
         let cancel = CancellationToken::new();
+        let history: Arc<tokio::sync::Mutex<Vec<ScanEvent>>> = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let is_done = Arc::new(AtomicBool::new(false));
 
         let active_scan = ActiveScan {
             job_id: job_id.clone(),
             tx: tx.clone(),
+            history: history.clone(),
+            is_done: is_done.clone(),
             cancel: cancel.clone(),
         };
         *lock = Some(active_scan);
 
         let scanner = self.clone();
         tokio::spawn(async move {
-            let _ = scanner.scan_directory_impl(directory, tx, cancel).await;
-            let mut lock = scanner.active_scan.lock().await;
-            *lock = None;
+            // _rx_keep_alive keeps the broadcast channel open for the duration of the scan
+            let _rx_keep_alive = _rx_keep_alive;
+            if let Err(error) = scanner.scan_directory_impl(directory, tx.clone(), history.clone(), cancel).await {
+                let event = ScanEvent::Failed {
+                    message: format!("Scan failed: {error}"),
+                };
+                history.lock().await.push(event.clone());
+                let _ = tx.send(event);
+            }
+
+            // Mark the scan as fully done so a new one can overwrite it
+            is_done.store(true, Ordering::SeqCst);
         });
 
         Ok(job_id)
@@ -207,6 +226,7 @@ impl ScannerService {
         &self,
         directory: PathBuf,
         tx: broadcast::Sender<ScanEvent>,
+        history: Arc<tokio::sync::Mutex<Vec<ScanEvent>>>,
         cancel: CancellationToken,
     ) -> Result<ScanResult, AppError> {
         let resolved = fs::canonicalize(&directory).await.map_err(|e| AppError::Http {
@@ -279,37 +299,57 @@ impl ScannerService {
                 }
             }
 
-            let _ = tx.send(ScanEvent::Walk { found: files.len() });
+            // Always send a Walk event after processing each directory
+            let event = ScanEvent::Walk { found: files.len() };
+            history.lock().await.push(event.clone());
+            let _ = tx.send(event);
+        }
+
+        // Send a final Walk event with the definitive file count
+        {
+            let event = ScanEvent::Walk { found: files.len() };
+            history.lock().await.push(event.clone());
+            let _ = tx.send(event);
         }
 
         let total = files.len();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.scan_concurrency.get()));
         let (tx_track, mut rx_track) = tokio::sync::mpsc::channel(100);
-        let mut spawn_tasks = futures_util::stream::FuturesUnordered::new();
 
-        for file in files {
-            if cancel.is_cancelled() { break; }
-            let permit = match semaphore.clone().acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => break, // semaphore closed, shouldn't happen but safe exit
-            };
-            let ffmpeg = self.ffmpeg.clone();
-            let tx = tx_track.clone();
+        let ffmpeg_service = self.ffmpeg.clone();
+        tokio::spawn(async move {
+            for file in files {
+                if cancel.is_cancelled() { break; }
+                let permit = match semaphore.clone().acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+                let ffmpeg = ffmpeg_service.clone();
+                let tx: tokio::sync::mpsc::Sender<Result<Track, anyhow::Error>> = tx_track.clone();
 
-            spawn_tasks.push(tokio::spawn(async move {
-                let _p = permit;
-                let meta = fs::metadata(&file).await.map_err(|e| anyhow!("Stat failed: {}", e))?;
-                let probe = ffmpeg.probe_track_metadata(&file).await.map_err(|e| anyhow!("Probe failed: {:?}", e))?;
-                let track = parse_track(&file, meta, probe);
-                let _ = tx.send(Ok(track)).await;
-                Ok::<_, anyhow::Error>(())
-            }));
-        }
-        drop(tx_track); // close sending end
+                tokio::spawn(async move {
+                    let _p = permit;
+                    let meta = fs::metadata(&file).await.map_err(|e| anyhow!("Stat failed: {}", e));
+                    let meta = match meta {
+                        Ok(m) => m,
+                        Err(e) => { let _ = tx.send(Err(e)).await; return; }
+                    };
+                    let probe = ffmpeg.probe_track_metadata(&file).await.map_err(|e| anyhow!("Probe failed: {:?}", e));
+                    let probe = match probe {
+                        Ok(p) => p,
+                        Err(e) => { let _ = tx.send(Err(anyhow!("{:?}", e))).await; return; }
+                    };
+                    let track = parse_track(&file, meta, probe);
+                    let _ = tx.send(Ok(track)).await;
+                });
+            }
+            drop(tx_track); // close sending end so rx_track drains naturally
+        });
 
         let mut done = 0;
         let mut errors = 0;
         let mut tracks_to_insert = Vec::new();
+        let mut imported = 0;
         
         while let Some(res) = rx_track.recv().await {
             done += 1;
@@ -325,26 +365,45 @@ impl ScannerService {
 
             if tracks_to_insert.len() >= 100 {
                 let batch = std::mem::take(&mut tracks_to_insert);
+                let batch_len = batch.len();
                 let pool = self.pool.clone();
-                spawn_blocking(move || {
-                    if let Ok(mut conn) = pool.get() {
-                        let _ = db::upsert_tracks_batch(&mut conn, &batch);
-                    }
+                let write_result = spawn_blocking(move || -> Result<(), AppError> {
+                    let mut conn = pool.get()?;
+                    db::upsert_tracks_batch(&mut conn, &batch)
                 }).await?;
+                match write_result {
+                    Ok(()) => imported += batch_len,
+                    Err(error) => {
+                        errors += batch_len;
+                        if failures.len() < self.config.max_scan_failures.get() {
+                            failures.push(Failure { path: "[database]".into(), message: error.to_string() });
+                        }
+                    }
+                }
             }
             
-            let _ = tx.send(ScanEvent::Probe { done, total, errors });
+            let event = ScanEvent::Probe { done, total, errors };
+            history.lock().await.push(event.clone());
+            let _ = tx.send(event);
         }
 
         // Insert remainder
         if !tracks_to_insert.is_empty() {
             let pool = self.pool.clone();
-            let batch = tracks_to_insert.clone();
-            spawn_blocking(move || {
-                if let Ok(mut conn) = pool.get() {
-                    let _ = db::upsert_tracks_batch(&mut conn, &batch);
-                }
+            let batch = std::mem::take(&mut tracks_to_insert);
+            let batch_len = batch.len();
+            let write_result = spawn_blocking(move || -> Result<(), AppError> {
+                let mut conn = pool.get()?;
+                db::upsert_tracks_batch(&mut conn, &batch)
             }).await?;
+            match write_result {
+                Ok(()) => imported += batch_len,
+                Err(error) => {
+                    if failures.len() < self.config.max_scan_failures.get() {
+                        failures.push(Failure { path: "[database]".into(), message: error.to_string() });
+                    }
+                }
+            }
         }
         
         let pool = self.pool.clone();
@@ -355,14 +414,16 @@ impl ScannerService {
 
         let result = ScanResult {
             tracks: all_tracks,
-            imported: done - errors,
+            imported,
             failures,
         };
         
         metrics::counter!("scanner_imported_total").increment(result.imported as u64);
         metrics::counter!("scanner_failures_total").increment(result.failures.len() as u64);
 
-        let _ = tx.send(ScanEvent::Complete(result.clone()));
+        let event = ScanEvent::Complete(result.clone());
+        history.lock().await.push(event.clone());
+        let _ = tx.send(event);
 
         Ok(result)
     }
