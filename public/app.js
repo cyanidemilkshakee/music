@@ -20,13 +20,15 @@ import {
   queueTrack,
   clearQueue,
   removeQueueItem,
+  moveQueueItem,
   playPlaylist,
+  restoreQueue,
   storedVolume,
   setShuffle,
   cycleRepeat
 } from "./modules/player.js";
 import { updateVolumeUI } from "./modules/audio.js";
-import { openImportSheet, closeImportSheet, doImport } from "./modules/import-lib.js";
+import { openImportSheet, closeImportSheet, doImport, chooseLibraryFolder, directoryFromDrop, forgetLibrarySource, refreshLibrarySources } from "./modules/import-lib.js";
 import {
   closePlaylistPicker,
   createPlaylistFromPicker,
@@ -42,11 +44,35 @@ import {
 import { showCtx, closeCtx, getCtxTrackId } from "./modules/context-menu.js";
 import { trackTitle } from "./modules/utils.js";
 import { getStorage, setStorage } from "./modules/storage.js";
-import { mountLiquidGlassIslands } from "./modules/liquid-glass.js";
+import { clearFilters, updateFiltersFromForm } from "./modules/filters.js";
+import { toggleFavorite } from "./modules/favorites.js";
 import { initVisualizer } from "./modules/visualizer.js";
 import "./modules/shortcuts.js";
 
-let lastTrackClick = { id: null, at: 0 };
+const DOUBLE_PLAY_WINDOW_MS = 650;
+const SINGLE_SELECT_DELAY_MS = 280;
+let pendingTrackActivation = { id: null, at: 0, timer: null };
+
+function selectOrPlayTrack(trackId) {
+  const now = Date.now();
+  if (pendingTrackActivation.id === trackId && now - pendingTrackActivation.at <= DOUBLE_PLAY_WINDOW_MS) {
+    window.clearTimeout(pendingTrackActivation.timer);
+    pendingTrackActivation = { id: null, at: 0, timer: null };
+    playTrack(trackId);
+    return;
+  }
+
+  window.clearTimeout(pendingTrackActivation.timer);
+  pendingTrackActivation = {
+    id: trackId,
+    at: now,
+    timer: window.setTimeout(() => {
+      state.selectedTrackId = trackId;
+      renderGrid();
+      pendingTrackActivation = { id: null, at: 0, timer: null };
+    }, SINGLE_SELECT_DELAY_MS)
+  };
+}
 
 function reportAppError(error, fallback = "Something went wrong.") {
   const message = error?.message || fallback;
@@ -92,13 +118,16 @@ function syncLibraryFromServer(data) {
 }
 
 async function loadState() {
-  const [health, data] = await Promise.all([
+  const [health, data, recent] = await Promise.all([
     api("/api/health", { timeoutMs: 15_000 }).catch(error => ({ ok: false, ffmpeg: error.message })),
-    api("/api/state", { timeoutMs: 30_000 }).catch(error => ({ tracks: [], playlists: [], error: error.message }))
+    api("/api/state", { timeoutMs: 30_000 }).catch(error => ({ tracks: [], playlists: [], error: error.message })),
+    api("/api/recent", { timeoutMs: 10_000 }).catch(() => ({ recentTracks: [] }))
   ]);
 
   state.health = health;
   syncLibraryFromServer(data);
+  restoreQueue();
+  state.recentIds = (Array.isArray(recent.recentTracks) ? recent.recentTracks : []).map(track => track.id);
 
   if (!health.ok) {
     showToast(`Warning: FFmpeg not found. Playback unavailable. ${health.ffmpeg || ""}`, 8000);
@@ -111,6 +140,7 @@ async function loadState() {
   setView(state.activeView, true);
   renderPlaylistsSidebar();
   render();
+  refreshLibrarySources().catch(() => {});
 
   el.audio.volume = storedVolume();
   updateVolumeUI();
@@ -137,7 +167,6 @@ async function clearCache() {
 }
 
 hydrateIcons();
-mountLiquidGlassIslands();
 initVisualizer();
 loadState().catch(error => {
   reportAppError(error, "Failed to load the library.");
@@ -170,6 +199,38 @@ document.addEventListener("click", event => {
       event.preventDefault();
       event.stopPropagation();
       openPlaylistPicker(trackPlaylist.dataset.trackPlaylist, event);
+      return;
+    }
+
+    const favorite = event.target.closest("[data-track-favorite]");
+    if (favorite) {
+      event.preventDefault();
+      event.stopPropagation();
+      const added = toggleFavorite(favorite.dataset.trackFavorite);
+      showToast(added ? "Added to favorites" : "Removed from favorites", 1800);
+      renderGrid();
+      return;
+    }
+
+    const loadMore = event.target.closest("[data-load-more]");
+    if (loadMore) {
+      state.gridLimit += state.gridPageSize;
+      renderGrid();
+      return;
+    }
+
+    const source = event.target.closest("[data-library-source]");
+    if (source) {
+      el.folderInputSheet.value = source.dataset.librarySource;
+      doImport(source.dataset.librarySource);
+      return;
+    }
+
+    const sourceRemove = event.target.closest("[data-library-source-remove]");
+    if (sourceRemove) {
+      event.preventDefault();
+      event.stopPropagation();
+      forgetLibrarySource(sourceRemove.dataset.librarySourceRemove).catch(showActionError);
       return;
     }
 
@@ -241,15 +302,7 @@ document.addEventListener("click", event => {
         playTrack(trackId);
         return;
       }
-      const now = Date.now();
-      if (lastTrackClick.id === trackId && now - lastTrackClick.at < 420) {
-        lastTrackClick = { id: null, at: 0 };
-        playTrack(trackId);
-        return;
-      }
-      lastTrackClick = { id: trackId, at: now };
-      state.selectedTrackId = trackId;
-      renderGrid();
+      selectOrPlayTrack(trackId);
       return;
     }
 
@@ -302,26 +355,6 @@ document.addEventListener("contextmenu", event => {
   showCtx(event.clientX, event.clientY, card.dataset.trackId);
 });
 
-document.addEventListener("dblclick", event => {
-  const card = event.target.closest(".grid-card[data-track-id]");
-  if (card && !event.target.closest("[data-track-playlist], [data-track-remove-playlist], [data-play-btn]")) {
-    event.preventDefault();
-    event.stopPropagation();
-    playTrack(card.dataset.trackId);
-    return;
-  }
-
-  const groupCard = event.target.closest(".grid-card[data-group-type]");
-  if (groupCard) {
-    const group = groupTracks(groupCard.dataset.groupType)
-      .find(item => item.key === groupCard.dataset.groupKey);
-    if (group?.tracks.length) {
-      const ids = group.tracks.map(track => track.id);
-      playTrack(ids[0], ids, 0);
-    }
-  }
-}, true);
-
 el.playButton.addEventListener("click", playPause);
 el.nextButton.addEventListener("click", nextTrack);
 el.prevButton.addEventListener("click", prevTrack);
@@ -332,21 +365,6 @@ el.shuffleButton.addEventListener("click", event => {
 el.repeatButton.addEventListener("click", event => {
   event.stopPropagation();
   cycleRepeat();
-});
-
-el.moreButton.addEventListener("click", event => {
-  event.stopPropagation();
-  const track = state.tracks.find(item => item.id === state.currentTrackId)
-    || state.tracks.find(item => item.id === state.selectedTrackId);
-  if (!track) return;
-
-  const rect = el.moreButton.getBoundingClientRect();
-  el.contextMenu.style.visibility = "hidden";
-  el.contextMenu.classList.add("is-open");
-  const menuHeight = el.contextMenu.offsetHeight || 200;
-  el.contextMenu.classList.remove("is-open");
-  el.contextMenu.style.visibility = "";
-  showCtx(rect.left, rect.top - menuHeight - 8, track.id);
 });
 
 el.queueButton.addEventListener("click", event => {
@@ -364,13 +382,6 @@ el.queueCloseButton?.addEventListener("click", event => {
   event.stopPropagation();
   state.queueOpen = false;
   renderQueue();
-});
-
-el.playerPlaylistButton?.addEventListener("click", event => {
-  event.stopPropagation();
-  const track = state.tracks.find(item => item.id === state.currentTrackId)
-    || state.tracks.find(item => item.id === state.selectedTrackId);
-  if (track) openPlaylistPicker(track.id, event);
 });
 
 el.playlistPickerClose?.addEventListener("click", closePlaylistPicker);
@@ -413,11 +424,60 @@ el.clearCacheButton?.addEventListener("click", clearCache);
 el.sidebarImportButton?.addEventListener("click", openImportSheet);
 el.importSheetClose.addEventListener("click", closeImportSheet);
 el.importButtonSheet.addEventListener("click", () => doImport(el.folderInputSheet.value.trim()));
+el.pickFolderButton?.addEventListener("click", chooseLibraryFolder);
 el.folderInputSheet.addEventListener("keydown", event => {
   if (event.key === "Enter") doImport(el.folderInputSheet.value.trim());
 });
 el.importSheet.addEventListener("click", event => {
   if (event.target === el.importSheet) closeImportSheet();
+});
+el.importDropZone?.addEventListener("dragover", event => {
+  event.preventDefault();
+  el.importDropZone.classList.add("is-dragging");
+});
+el.importDropZone?.addEventListener("dragleave", () => el.importDropZone.classList.remove("is-dragging"));
+el.importDropZone?.addEventListener("drop", event => {
+  event.preventDefault();
+  el.importDropZone.classList.remove("is-dragging");
+  const directory = directoryFromDrop(event);
+  if (!directory) {
+    showToast("Drop a folder from File Explorer, or use Choose Folder.");
+    return;
+  }
+  el.folderInputSheet.value = directory;
+  doImport(directory);
+});
+let draggedQueueIndex = null;
+el.queueList?.addEventListener("dragstart", event => {
+  const item = event.target.closest("[data-queue-drag-index]");
+  if (!item) return;
+  draggedQueueIndex = Number(item.dataset.queueDragIndex);
+  event.dataTransfer.effectAllowed = "move";
+});
+el.queueList?.addEventListener("dragover", event => {
+  if (draggedQueueIndex !== null) event.preventDefault();
+});
+el.queueList?.addEventListener("drop", event => {
+  const target = event.target.closest("[data-queue-drag-index]");
+  if (!target || draggedQueueIndex === null) return;
+  event.preventDefault();
+  moveQueueItem(draggedQueueIndex, Number(target.dataset.queueDragIndex));
+  draggedQueueIndex = null;
+});
+el.queueList?.addEventListener("dragend", () => { draggedQueueIndex = null; });
+
+el.filterToggleButton?.addEventListener("click", () => {
+  el.filterPanel.classList.toggle("is-hidden");
+});
+[el.filterGenre, el.filterYear, el.filterCodec, el.filterDuration, el.filterFavorite, el.filterRecent]
+  .filter(Boolean)
+  .forEach(control => control.addEventListener("change", () => {
+    updateFiltersFromForm();
+    render();
+  }));
+el.clearFiltersButton?.addEventListener("click", () => {
+  clearFilters();
+  render();
 });
 
 el.searchInput.addEventListener("input", event => {
@@ -435,6 +495,7 @@ el.searchInput.addEventListener("input", event => {
     }
     state.activeGroup = null;
     state.activeView = "search";
+    state.gridLimit = state.gridPageSize;
     el.navItems.forEach(button => button.classList.remove("is-active"));
     render();
     return;
@@ -442,6 +503,7 @@ el.searchInput.addEventListener("input", event => {
 
   const target = state.searchReturn;
   state.searchReturn = null;
+  state.gridLimit = state.gridPageSize;
   if (target?.group) openGroup(target.group.type, target.group.key, true);
   else if (target?.playlist) openPlaylist(target.playlist, true);
   else setView(target?.view || "home", true);
