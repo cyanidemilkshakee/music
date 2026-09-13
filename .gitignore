@@ -19,6 +19,3 @@ backend/test_data_api/
 .env
 .env.local
 .env.*
-
-# Frontend Build Output
-public/generated/liquid-glass-islands.js
