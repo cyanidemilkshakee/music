@@ -37,6 +37,7 @@ function scrubAt(clientX) {
   const duration = Number(el.audio.duration) || 0;
   if (!Number.isFinite(duration) || duration <= 0) return;
   el.audio.currentTime = ratio * duration;
+  if (el.seekRange) el.seekRange.value = String(Math.round(el.audio.currentTime));
   updateProgress();
 }
 
@@ -127,4 +128,11 @@ el.audio.addEventListener("error", () => {
   renderTransport();
   renderGrid();
   renderNowPlaying();
+});
+
+el.seekRange?.addEventListener("input", () => {
+  const duration = Number(el.audio.duration) || 0;
+  if (duration <= 0) return;
+  el.audio.currentTime = Math.min(duration, Math.max(0, Number(el.seekRange.value) || 0));
+  updateProgress();
 });

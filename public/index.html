@@ -12,10 +12,16 @@
     <div class="import-sheet is-hidden" id="importSheet">
       <div class="import-sheet-inner">
         <h3>Add to Library</h3>
-        <p class="sheet-copy">Enter the absolute path to your music folder.</p>
+        <p class="sheet-copy">Choose a folder on this computer, select a saved source, or enter an absolute path.</p>
         <div class="import-row">
           <input id="folderInputSheet" class="import-input" type="text" spellcheck="false" placeholder="C:\Music">
+          <button id="pickFolderButton" class="import-btn import-btn-secondary" type="button">Choose Folder</button>
           <button id="importButtonSheet" class="import-btn" type="button">Import</button>
+        </div>
+        <div id="importDropZone" class="import-drop-zone" tabindex="0">Or drop a music folder here from File Explorer</div>
+        <div class="library-source-wrap">
+          <p class="source-label">Saved folders</p>
+          <div id="librarySourceList" class="library-source-list" aria-live="polite"></div>
         </div>
         <div id="importStatusSheet" class="import-status"></div>
         <button class="sheet-close-btn" id="importSheetClose" type="button">Cancel</button>
@@ -113,11 +119,22 @@
               <h1 class="page-title" id="viewTitle">Library</h1>
             </div>
             <div class="section-actions">
+              <button class="icon-btn header-toggle" id="filterToggleButton" title="Filter library" aria-label="Filter library" type="button"><span id="filterCount">Filters</span></button>
               <button class="icon-btn header-toggle" id="layoutToggleButton" title="Switch to List" aria-label="Switch to List" type="button">
                 <span data-icon="list"></span>
               </button>
             </div>
           </div>
+
+          <section class="filter-panel is-hidden" id="filterPanel" aria-label="Library filters">
+            <div class="filter-field"><label for="filterGenre">Genre</label><select id="filterGenre"></select></div>
+            <div class="filter-field"><label for="filterYear">Year</label><select id="filterYear"></select></div>
+            <div class="filter-field"><label for="filterCodec">Format</label><select id="filterCodec"></select></div>
+            <div class="filter-field"><label for="filterDuration">Length</label><select id="filterDuration"><option value="">Any length</option><option value="short">Under 3 min</option><option value="medium">3–6 min</option><option value="long">Over 6 min</option></select></div>
+            <label class="filter-check"><input id="filterFavorite" type="checkbox"> Favorites</label>
+            <label class="filter-check"><input id="filterRecent" type="checkbox"> Recently played</label>
+            <button id="clearFiltersButton" class="filter-clear" type="button">Clear</button>
+          </section>
 
           <div class="list-headers is-hidden" id="listHeaders">
             <div class="header-col header-empty"></div>
@@ -144,13 +161,13 @@
             <div class="scrubber-wrap">
               <span class="time-label" id="currentTime">0:00</span>
               <div class="scrubber-bar" id="scrubberBar">
-                <canvas class="waveform-canvas" id="waveformCanvas"></canvas>
+                <div class="scrubber-bg" aria-hidden="true"><div class="scrubber-progress" id="scrubberProgress"></div></div>
                 <div class="scrubber-handle" id="scrubberHandle"></div>
+                <input id="seekRange" class="seek-range" type="range" min="0" max="0" value="0" step="1" aria-label="Seek within track">
               </div>
               <span class="time-label" id="timeRemaining">-0:00</span>
             </div>
             <div class="transport-wrap">
-              <div class="codec-info" id="codecDisplay"></div>
               <div class="transport-controls">
                 <button class="icon-btn" id="shuffleButton" title="Shuffle" type="button"><span data-icon="shuffle"></span></button>
                 <button class="icon-btn" id="prevButton" title="Previous" type="button"><span data-icon="skip-back"></span></button>
@@ -158,15 +175,14 @@
                 <button class="icon-btn" id="nextButton" title="Next" type="button"><span data-icon="skip-forward"></span></button>
                 <button class="icon-btn" id="repeatButton" title="Repeat" type="button"><span data-icon="repeat"></span></button>
               </div>
-              <div class="bitrate-info" id="bitrateDisplay"></div>
             </div>
           </div>
 
           <div class="pill-right">
-            <button class="icon-btn" id="fsExpandBtn" title="Full Screen Visualizer" type="button"><span data-icon="maximize"></span></button>
-            <button class="icon-btn" id="playerPlaylistButton" title="Add current track to playlist" aria-label="Add current track to playlist" type="button"><span data-icon="plus"></span></button>
-            <button class="icon-btn" id="moreButton" title="More" type="button"><span data-icon="more"></span></button>
-            <button class="icon-btn" id="queueButton" title="Queue" type="button"><span data-icon="queue"></span></button>
+            <div class="player-actions">
+              <button class="icon-btn" id="fsExpandBtn" title="Full Screen Visualizer" type="button"><span data-icon="maximize"></span></button>
+              <button class="icon-btn" id="queueButton" title="Queue" type="button"><span data-icon="queue"></span></button>
+            </div>
             <div class="volume-container">
               <button class="icon-btn" id="muteBtn" type="button"><span data-icon="volume-high"></span></button>
               <div class="vol-slider-wrap" id="volScrubberBg">

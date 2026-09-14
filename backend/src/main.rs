@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .nest("/api", routes::media::router())
         .nest("/api", routes::api::router())
+        .nest("/api", routes::library::router())
         .nest("/metrics", metrics::router())
         .fallback_service(serve_dir)
         .with_state(app_state)

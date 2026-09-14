@@ -1,5 +1,7 @@
 pub mod pool;
 pub mod migrations;
+pub mod sources;
+pub use sources::{delete_library_source, get_library_sources, remember_library_source};
 
 use crate::error::AppError;
 use rusqlite::{params, Connection, Row};

@@ -16,6 +16,16 @@ export const el = {
   importPanel:       document.querySelector("#importPanel"),
   contentScroll:     document.querySelector("#contentScroll"),
   viewTitle:         document.querySelector("#viewTitle"),
+  filterToggleButton: document.querySelector("#filterToggleButton"),
+  filterPanel: document.querySelector("#filterPanel"),
+  filterCount: document.querySelector("#filterCount"),
+  filterGenre: document.querySelector("#filterGenre"),
+  filterYear: document.querySelector("#filterYear"),
+  filterCodec: document.querySelector("#filterCodec"),
+  filterDuration: document.querySelector("#filterDuration"),
+  filterFavorite: document.querySelector("#filterFavorite"),
+  filterRecent: document.querySelector("#filterRecent"),
+  clearFiltersButton: document.querySelector("#clearFiltersButton"),
 
   // Import Sheet
   importSmallButton:  document.querySelector("#importSmallButton"),
@@ -25,6 +35,9 @@ export const el = {
   importButtonSheet:  document.querySelector("#importButtonSheet"),
   importStatusSheet:  document.querySelector("#importStatusSheet"),
   importSheetClose:   document.querySelector("#importSheetClose"),
+  pickFolderButton: document.querySelector("#pickFolderButton"),
+  importDropZone: document.querySelector("#importDropZone"),
+  librarySourceList: document.querySelector("#librarySourceList"),
   sidebarImportButton: document.querySelector("#sidebarImportButton"),
   clearCacheButton: document.querySelector("#clearCacheButton"),
 
@@ -40,10 +53,7 @@ export const el = {
   playButton:    document.querySelector("#playButton"),
   nextButton:    document.querySelector("#nextButton"),
   repeatButton:  document.querySelector("#repeatButton"),
-  moreButton:    document.querySelector("#moreButton"),
   queueButton:   document.querySelector("#queueButton"),
-  codecDisplay:  document.querySelector("#codecDisplay"),
-  bitrateDisplay:document.querySelector("#bitrateDisplay"),
 
   // Scrubber
   currentTime:      document.querySelector("#currentTime"),
@@ -51,6 +61,7 @@ export const el = {
   scrubberBar:      document.querySelector("#scrubberBar"),
   scrubberProgress: document.querySelector("#scrubberProgress"),
   scrubberHandle:   document.querySelector("#scrubberHandle"),
+  seekRange:        document.querySelector("#seekRange"),
 
   // Volume
   muteBtn:       document.querySelector("#muteBtn"),
@@ -63,7 +74,6 @@ export const el = {
   queueCount:       document.querySelector("#queueCount"),
   queueClearButton: document.querySelector("#queueClearButton"),
   queueCloseButton: document.querySelector("#queueCloseButton"),
-  playerPlaylistButton: document.querySelector("#playerPlaylistButton"),
 
   // Misc
   contextMenu: document.querySelector("#contextMenu"),
@@ -76,7 +86,6 @@ export const el = {
   audio:       document.querySelector("#audio"),
   
   // Visualizer / Full Screen UI
-  waveformCanvas: document.querySelector("#waveformCanvas"),
   fsExpandBtn:    document.querySelector("#fsExpandBtn"),
   fullScreenPlayer: document.querySelector("#fullScreenPlayer"),
   bgCanvas:       document.querySelector("#bg-canvas"),

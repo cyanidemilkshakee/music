@@ -178,7 +178,13 @@ async fn scan_directory(
 ) -> Result<impl IntoResponse, AppError> {
     payload.validate()?;
     let path = PathBuf::from(payload.directory);
+    let source_path = path.to_string_lossy().to_string();
     let job_id = state.scanner.start_scan(path).await?;
+    let pool = state.pool.clone();
+    spawn_blocking(move || {
+        let mut conn = pool.get()?;
+        db::remember_library_source(&mut conn, &source_path)
+    }).await??;
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "jobId": job_id }))))
 }
 
