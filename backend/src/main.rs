@@ -1,15 +1,17 @@
 use axum::{
+    http::{header::CACHE_CONTROL, HeaderValue},
     middleware as axum_middleware,
     Router,
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tower::limit::ConcurrencyLimitLayer;
+use tower::{limit::ConcurrencyLimitLayer, ServiceBuilder};
 use tower_http::{
     compression::CompressionLayer,
     services::{ServeDir, ServeFile},
     limit::RequestBodyLimitLayer,
+    set_header::SetResponseHeaderLayer,
 };
 use tracing::{info, Level};
 use tracing_subscriber::{FmtSubscriber, EnvFilter};
@@ -73,8 +75,15 @@ async fn main() -> anyhow::Result<()> {
     let current_dir = std::env::current_dir()?;
     let public_dir = current_dir.parent().unwrap_or(&current_dir).join("public");
 
-    let serve_dir = ServeDir::new(&public_dir)
-        .not_found_service(ServeFile::new(public_dir.join("index.html")));
+    let serve_dir = ServiceBuilder::new()
+        .layer(SetResponseHeaderLayer::if_not_present(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-store, must-revalidate"),
+        ))
+        .service(
+            ServeDir::new(&public_dir)
+                .not_found_service(ServeFile::new(public_dir.join("index.html"))),
+        );
 
     let app = Router::new()
         .nest("/api", routes::media::router())
