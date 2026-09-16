@@ -50,14 +50,24 @@ import { initVisualizer } from "./modules/visualizer.js";
 import "./modules/shortcuts.js";
 
 const DOUBLE_PLAY_WINDOW_MS = 650;
-const SINGLE_SELECT_DELAY_MS = 280;
+const SINGLE_SELECT_DELAY_MS = 420;
 let pendingTrackActivation = { id: null, at: 0, timer: null };
 
-function selectOrPlayTrack(trackId) {
+function cancelPendingTrackActivation() {
+  window.clearTimeout(pendingTrackActivation.timer);
+  pendingTrackActivation = { id: null, at: 0, timer: null };
+}
+
+function selectOrPlayTrack(trackId, event) {
   const now = Date.now();
-  if (pendingTrackActivation.id === trackId && now - pendingTrackActivation.at <= DOUBLE_PLAY_WINDOW_MS) {
-    window.clearTimeout(pendingTrackActivation.timer);
-    pendingTrackActivation = { id: null, at: 0, timer: null };
+  const repeatedTap = pendingTrackActivation.id === trackId
+    && now - pendingTrackActivation.at <= DOUBLE_PLAY_WINDOW_MS;
+  const browserDoubleTap = Number(event?.detail) >= 2;
+
+  if (repeatedTap || browserDoubleTap) {
+    cancelPendingTrackActivation();
+    state.selectedTrackId = trackId;
+    renderGrid();
     playTrack(trackId);
     return;
   }
@@ -69,7 +79,7 @@ function selectOrPlayTrack(trackId) {
     timer: window.setTimeout(() => {
       state.selectedTrackId = trackId;
       renderGrid();
-      pendingTrackActivation = { id: null, at: 0, timer: null };
+      pendingTrackActivation.timer = null;
     }, SINGLE_SELECT_DELAY_MS)
   };
 }
@@ -302,7 +312,7 @@ document.addEventListener("click", event => {
         playTrack(trackId);
         return;
       }
-      selectOrPlayTrack(trackId);
+      selectOrPlayTrack(trackId, event);
       return;
     }
 

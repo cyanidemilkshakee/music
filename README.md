@@ -8,7 +8,6 @@ The application does not use runtime CDN assets or send library data to an exter
 
 - Rust (the stable toolchain)
 - FFmpeg and FFprobe available on `PATH`, or paths configured in `.env`
-- Node.js and npm to use the convenience scripts
 - On Windows, the MSVC C++ Build Tools with the Desktop development with C++ workload
 
 ## Setup
@@ -22,17 +21,11 @@ Copy-Item .env.example .env
 Start the player:
 
 ```powershell
-npm start
-```
-
-Open [http://localhost:1111](http://localhost:1111).
-
-You can also start the backend directly:
-
-```powershell
 Set-Location backend
 cargo run --release
 ```
+
+Open [http://localhost:1111](http://localhost:1111). `npm start` remains available as a convenience alias for the same command.
 
 ## Local-only behavior
 
@@ -59,10 +52,11 @@ Local Amp listens on `127.0.0.1` by default. The `HOST` value must be a loopback
 
 ## Using the player
 
-1. Open the import sheet and enter an absolute path to a music folder.
-2. Select **Import Folder**. Import progress is streamed to the interface.
-3. Choose a track to play it. With the default streaming mode, playback can begin before the full track is transcoded.
-4. Use the sidebar to create playlists and the track context menu to add tracks or refresh metadata.
+1. Select **Add Folder**, then choose a folder with the native Windows picker, drag a folder from File Explorer, or enter an absolute path. Imported folders are kept as saved sources for one-click rescans.
+2. Import progress is streamed to the interface. A failed scan reports its error without leaving the sheet waiting.
+3. Use the filter panel to narrow the library by genre, year, codec, duration, favorites, or recently played tracks.
+4. Choose a track to play it. The queue persists between sessions, supports drag-and-drop reordering, and has a full track-details view with embedded metadata and lyrics when available.
+5. Use the sidebar to create playlists and the track context menu to add tracks or refresh metadata.
 
 Imports report a terminal error when a folder cannot be opened, rather than leaving the interface waiting for progress.
 

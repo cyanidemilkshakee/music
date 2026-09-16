@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Apple Music - Local</title>
     <meta name="description" content="High-fidelity local music player with an Apple Music macOS interface.">
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/styles.css?v=20260915-light">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>">
   </head>
   <body>
@@ -41,7 +41,7 @@
               <li>
                 <button class="nav-item is-active" data-view="home" type="button">
                   <span data-icon="home" class="nav-icon"></span>
-                  <span>Home</span>
+                  <span class="nav-label" data-mobile-label="Home">Home</span>
                 </button>
               </li>
             </ul>
@@ -50,27 +50,27 @@
               <h3 class="section-title">Library</h3>
               <ul class="nav-list">
                 <li>
-                  <button class="nav-item" data-view="recent" type="button">
-                    <span data-icon="time" class="nav-icon"></span>
-                    <span>Recently Added</span>
+                <button class="nav-item" data-view="recent" type="button">
+                  <span data-icon="time" class="nav-icon"></span>
+                  <span class="nav-label" data-mobile-label="Recent">Recently Added</span>
                   </button>
                 </li>
                 <li>
-                  <button class="nav-item" data-view="artists" type="button">
-                    <span data-icon="mic" class="nav-icon"></span>
-                    <span>Artists</span>
+                <button class="nav-item" data-view="artists" type="button">
+                  <span data-icon="mic" class="nav-icon"></span>
+                  <span class="nav-label" data-mobile-label="Artists">Artists</span>
                   </button>
                 </li>
                 <li>
-                  <button class="nav-item" data-view="albums" type="button">
-                    <span data-icon="album" class="nav-icon"></span>
-                    <span>Albums</span>
+                <button class="nav-item" data-view="albums" type="button">
+                  <span data-icon="album" class="nav-icon"></span>
+                  <span class="nav-label" data-mobile-label="Albums">Albums</span>
                   </button>
                 </li>
                 <li>
-                  <button class="nav-item" data-view="songs" type="button">
-                    <span data-icon="note" class="nav-icon"></span>
-                    <span>Songs</span>
+                <button class="nav-item" data-view="songs" type="button">
+                  <span data-icon="note" class="nav-icon"></span>
+                  <span class="nav-label" data-mobile-label="Songs">Songs</span>
                   </button>
                 </li>
               </ul>
@@ -83,9 +83,9 @@
               </div>
               <ul class="nav-list playlist-nav">
                 <li>
-                  <button class="nav-item" data-view="playlists" type="button">
-                    <span data-icon="playlist" class="nav-icon"></span>
-                    <span>All Playlists</span>
+                <button class="nav-item" data-view="playlists" type="button">
+                  <span data-icon="playlist" class="nav-icon"></span>
+                  <span class="nav-label" data-mobile-label="Playlists">All Playlists</span>
                   </button>
                 </li>
               </ul>
@@ -261,6 +261,6 @@
     </div>
 
     <audio id="audio"></audio>
-    <script type="module" src="/app.js"></script>
+    <script type="module" src="/app.js?v=20260915-light"></script>
   </body>
 </html>
