@@ -2,6 +2,10 @@ import { state } from "./state.js";
 import { el } from "./dom.js";
 import { api } from "./api.js";
 import { toggleEmptyState, render } from "./render.js";
+import { esc } from "./utils.js";
+import { trapModalFocus } from "./modal-focus.js";
+
+let releaseImportFocus = null;
 
 function setImportStatus(message, className = "") {
   el.importStatusSheet.textContent = message;
@@ -11,11 +15,15 @@ function setImportStatus(message, className = "") {
 export function openImportSheet() {
   setImportStatus("");
   el.importSheet.classList.remove("is-hidden");
-  el.folderInputSheet.focus();
+  releaseImportFocus?.();
+  releaseImportFocus = trapModalFocus(el.importSheet, { onClose: closeImportSheet, initialFocus: el.folderInputSheet });
+  refreshLibrarySources().catch(() => {});
 }
 
 export function closeImportSheet() {
   el.importSheet.classList.add("is-hidden");
+  releaseImportFocus?.();
+  releaseImportFocus = null;
 }
 
 function syncImportedTracks(data) {
@@ -30,6 +38,58 @@ function syncImportedTracks(data) {
   }
   state.queue = state.tracks.map(track => track.id);
   state.queueIndex = -1;
+}
+
+export async function refreshLibrarySources() {
+  const data = await api("/api/library/sources", { timeoutMs: 10_000 });
+  const sources = Array.isArray(data.sources) ? data.sources : [];
+  state.librarySources = sources;
+  if (!el.librarySourceList) return;
+  el.librarySourceList.innerHTML = sources.length
+    ? sources.map(source => `
+      <div class="library-source">
+        <button class="library-source-path" data-library-source="${esc(source.path)}" type="button" title="Import ${esc(source.path)}">${esc(source.path)}</button>
+        <button class="library-source-remove" data-library-source-remove="${esc(source.id)}" type="button" aria-label="Remove saved folder">×</button>
+      </div>`).join("")
+    : `<p class="source-empty">Folders you import will appear here.</p>`;
+}
+
+export async function chooseLibraryFolder() {
+  if (state.busy) return;
+  const button = el.pickFolderButton;
+  if (button) button.disabled = true;
+  try {
+    const data = await api("/api/library/pick-folder", { method: "POST", timeoutMs: 120_000 });
+    if (data.directory) {
+      el.folderInputSheet.value = data.directory;
+      el.folderInputSheet.focus();
+    }
+  } catch (error) {
+    setImportStatus(error.message || "Could not open the folder picker.", "is-error");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+export async function forgetLibrarySource(id) {
+  if (!id) return;
+  await api(`/api/library/sources/${encodeURIComponent(id)}`, { method: "DELETE", timeoutMs: 10_000 });
+  await refreshLibrarySources();
+}
+
+export function directoryFromDrop(event) {
+  const rawUri = (event.dataTransfer?.getData("text/uri-list") || "")
+    .split(/\r?\n/)
+    .find(value => value && !value.startsWith("#"));
+  if (!rawUri?.startsWith("file:")) return "";
+  try {
+    const url = new URL(rawUri);
+    if (url.protocol !== "file:") return "";
+    const path = decodeURIComponent(url.pathname);
+    return /^\/[A-Za-z]:\//.test(path) ? path.slice(1).replaceAll("/", "\\") : path;
+  } catch {
+    return "";
+  }
 }
 
 export async function doImport(directory) {
@@ -105,6 +165,8 @@ export async function doImport(directory) {
                resultData = event;
                reader.cancel(); // close the SSE stream early
                break;
+            } else if (event.phase === "failed") {
+               throw new Error(event.message || "Scan failed.");
             }
           } catch(e) {
              console.error("SSE parse error", e, payload);
@@ -119,6 +181,7 @@ export async function doImport(directory) {
     }
 
     syncImportedTracks(resultData);
+    refreshLibrarySources().catch(() => {});
 
     const imported = Number(resultData.imported) || 0;
     const failures = Array.isArray(resultData.failures) ? resultData.failures : [];
