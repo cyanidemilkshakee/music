@@ -148,7 +148,6 @@ function renderLoop() {
   if (!el.audio.paused) rotation += .01 + pulse * .02;
   drawBackground(pulse);
   if (!el.audio.paused) {
-    drawWaveform(el.waveformCanvas, currentThemeColor);
     drawWaveform(el.fsWaveformCanvas, "#ffffff");
   }
 }
