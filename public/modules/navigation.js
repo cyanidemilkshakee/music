@@ -2,7 +2,7 @@
 import { state } from "./state.js";
 import { el }    from "./dom.js";
 import { groupTracks } from "./groups.js";
-import { render, renderViewTitle, renderGrid, renderGroupSidebar, renderPlaylistsSidebar } from "./render.js";
+import { render, renderViewTitle, renderGrid, renderPlaylistsSidebar } from "./render.js";
 import { cssEscape } from "./utils.js";
 
 const VALID_VIEWS = new Set(["home", "recent", "artists", "albums", "songs", "playlists", "search"]);
@@ -45,6 +45,7 @@ export function setView(view, skipHistory = false) {
   state.activeGroup     = null;
   state.sortField       = "none";
   state.sortDir         = "asc";
+  state.gridLimit       = state.gridPageSize;
   clearSearchState();
 
   el.navItems.forEach(btn =>
@@ -53,7 +54,6 @@ export function setView(view, skipHistory = false) {
 
   renderViewTitle();
   renderGrid();
-  renderGroupSidebar();
   renderPlaylistsSidebar();
 }
 
@@ -67,13 +67,13 @@ export function openGroup(type, key, skipHistory = false) {
   state.activeGroup      = { type, key, name: group.name };
   state.sortField        = "none";
   state.sortDir          = "asc";
+  state.gridLimit        = state.gridPageSize;
   clearSearchState();
 
   el.navItems.forEach(btn =>
     btn.classList.toggle("is-active", btn.dataset.view === state.activeView)
   );
   render();
-  renderGroupSidebar();
   renderPlaylistsSidebar();
 }
 
@@ -87,6 +87,7 @@ export function openPlaylist(playlistId, skipHistory = false) {
   state.activeGroup      = null;
   state.sortField        = "none";
   state.sortDir          = "asc";
+  state.gridLimit        = state.gridPageSize;
   clearSearchState();
 
   el.navItems.forEach(btn => btn.classList.remove("is-active"));
@@ -94,7 +95,6 @@ export function openPlaylist(playlistId, skipHistory = false) {
   if (btn) btn.classList.add("is-active");
 
   render();
-  renderGroupSidebar();
   renderPlaylistsSidebar();
 }
 
