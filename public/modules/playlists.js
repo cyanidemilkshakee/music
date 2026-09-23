@@ -6,6 +6,7 @@ import { render, renderPlaylistsSidebar, renderGrid } from "./render.js";
 import { openPlaylist, setView } from "./navigation.js";
 import { activePlaylist } from "./helpers.js";
 import { esc, coverUrl, cssEscape, trackTitle } from "./utils.js";
+import { trapModalFocus } from "./modal-focus.js";
 
 let creatingPlaylist = false;
 const playlistOps = new Set();
@@ -68,25 +69,6 @@ export async function createPlaylistFromButton() {
     return null;
   });
   if (playlist) openPlaylist(playlist.id);
-}
-
-function choosePlaylist() {
-  if (state.activePlaylistId) return activePlaylist();
-  if (!state.playlists.length) return null;
-  return state.playlists[0];
-}
-
-export async function addToPlaylist(track) {
-  if (!track?.id) return;
-  let playlist = choosePlaylist();
-  if (playlist === undefined) return;
-  if (!playlist) playlist = await createPlaylist("My Playlist");
-  if (!playlist) return;
-
-  await setTrackPlaylistMembership(track.id, new Set([...playlist.trackIds, track.id]), {
-    onlyPlaylistId: playlist.id,
-    toast: `Added to "${playlist.name}"`
-  });
 }
 
 async function addTrackToPlaylistId(playlistId, trackId) {
@@ -189,6 +171,7 @@ export async function deletePlaylist(playlistId) {
 }
 
 function closeDialog(overlay, resolve, value) {
+  overlay._releaseFocus?.();
   overlay.classList.remove("is-open");
   setTimeout(() => overlay.remove(), 180);
   resolve(value);
@@ -203,6 +186,9 @@ function buildDialog(title, bodyHtml) {
       ${bodyHtml}
     </div>`;
   document.body.appendChild(overlay);
+  overlay._releaseFocus = trapModalFocus(overlay, {
+    onClose: () => overlay.querySelector("[data-dialog-cancel]")?.click(),
+  });
   return overlay;
 }
 
@@ -326,9 +312,16 @@ export function openPlaylistPicker(trackId, event) {
   
   el.playlistPicker.classList.remove("is-hidden");
   el.playlistPicker.setAttribute("aria-hidden", "false");
+  el.playlistPicker._releaseFocus?.();
+  el.playlistPicker._releaseFocus = trapModalFocus(el.playlistPicker, {
+    onClose: closePlaylistPicker,
+    initialFocus: el.playlistPickerClose,
+  });
 }
 
 export function closePlaylistPicker() {
+  el.playlistPicker._releaseFocus?.();
+  el.playlistPicker._releaseFocus = null;
   el.playlistPicker.classList.add("is-hidden");
   el.playlistPicker.setAttribute("aria-hidden", "true");
   pickerTrackId = null;
