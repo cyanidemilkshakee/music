@@ -8,12 +8,50 @@ import { selectedTrack, playlistTracks } from "./helpers.js";
 import { getStorage, setStorage } from "./storage.js";
 import { coverUrl } from "./utils.js";
 import { updateThemeColor, updateVinylArt } from "./visualizer.js";
-import { FastAverageColor } from "https://esm.sh/fast-average-color@9.4.0";
-
-const fac = new FastAverageColor();
 
 let playRequestId = 0;
 let activeDecodeController = null;
+const QUEUE_STORAGE_KEY = "amp-queue";
+
+function persistQueue() {
+  setStorage(QUEUE_STORAGE_KEY, JSON.stringify({
+    ids: state.queue,
+    index: state.queueIndex,
+    shuffle: state.shuffle,
+    repeat: state.repeat,
+  }));
+}
+
+export function restoreQueue() {
+  try {
+    const saved = JSON.parse(getStorage(QUEUE_STORAGE_KEY, "{}"));
+    const validIds = new Set(state.tracks.map(track => track.id));
+    const ids = Array.isArray(saved.ids) ? saved.ids.filter(id => validIds.has(id)) : [];
+    if (ids.length) {
+      state.queue = ids;
+      state.queueIndex = Math.max(-1, Math.min(Number(saved.index) || -1, ids.length - 1));
+    }
+    state.shuffle = Boolean(saved.shuffle);
+    state.repeat = ["none", "all", "one"].includes(saved.repeat) ? saved.repeat : "none";
+  } catch {
+    // Queue persistence is a convenience; a corrupt local value should not affect playback.
+  }
+}
+
+async function updateThemeFromArtwork(url) {
+  const image = new Image();
+  image.decoding = "async";
+  image.src = url;
+  await image.decode();
+
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 1;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.drawImage(image, 0, 0, 1, 1);
+  const [red, green, blue] = context.getImageData(0, 0, 1, 1).data;
+  const hex = `#${[red, green, blue].map(value => value.toString(16).padStart(2, "0")).join("")}`;
+  updateThemeColor(hex);
+}
 
 export function storedVolume() {
   const value = parseFloat(getStorage("amp-volume", "1.0"));
@@ -77,6 +115,7 @@ export function setShuffle(enabled) {
   state.shuffle = next;
   if (state.shuffle) reorderQueueForShuffle();
   else restoreQueueOrder();
+  persistQueue();
   renderTransport();
   renderQueue();
 }
@@ -84,6 +123,7 @@ export function setShuffle(enabled) {
 export function cycleRepeat() {
   const cycle = { none: "all", all: "one", one: "none" };
   state.repeat = cycle[state.repeat] || "none";
+  persistQueue();
   renderTransport();
   renderQueue();
 }
@@ -103,6 +143,7 @@ export function queueTrack(trackId, placement = "end") {
   } else {
     state.queue.push(trackId);
   }
+  persistQueue();
   renderQueue();
   showToast(placement === "next" ? "Playing next" : "Added to queue", 2000);
 }
@@ -116,6 +157,7 @@ export function clearQueue() {
     state.queue = [];
     state.queueIndex = -1;
   }
+  persistQueue();
   render();
 }
 
@@ -137,7 +179,20 @@ export function removeQueueItem(index) {
     el.audio.pause();
     el.audio.removeAttribute("src");
   }
+  persistQueue();
   render();
+}
+
+export function moveQueueItem(fromIndex, toIndex) {
+  if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex)
+    || fromIndex < 0 || toIndex < 0
+    || fromIndex >= state.queue.length || toIndex >= state.queue.length
+    || fromIndex === toIndex) return;
+  const [trackId] = state.queue.splice(fromIndex, 1);
+  state.queue.splice(toIndex, 0, trackId);
+  refreshQueueIndex();
+  persistQueue();
+  renderQueue();
 }
 
 export function playPlaylist(playlist) {
@@ -179,20 +234,22 @@ export async function playTrack(trackId, queueIds = contextQueue(trackId), reque
   state.buffering = true;
   state.queue = nextQueue;
   state.queueIndex = nextIndex;
+  persistQueue();
   setStorage("amp-last-played", track.id);
 
   if (track.hasArtwork) {
     const artUrl = coverUrl(track);
     updateVinylArt(artUrl);
-    fac.getColorAsync(artUrl)
-      .then(color => { updateThemeColor(color.hex); })
+    updateThemeFromArtwork(artUrl)
       .catch(() => {}); // silently ignore — no artwork embedded
   } else {
     updateVinylArt(null); // reset to default
   }
 
   render();
-  api(`/api/recent/${encodeURIComponent(track.id)}`, { method: "POST", timeoutMs: 10_000 }).catch(() => {});
+  api(`/api/recent/${encodeURIComponent(track.id)}`, { method: "POST", timeoutMs: 10_000 })
+    .then(() => { state.recentIds = [track.id, ...state.recentIds.filter(id => id !== track.id)].slice(0, 50); })
+    .catch(() => {});
 
   try {
     const data = await api(`/api/decode/${encodeURIComponent(track.id)}`, {
