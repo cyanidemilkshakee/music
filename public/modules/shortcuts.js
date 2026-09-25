@@ -8,6 +8,7 @@ import { updateVolumeUI } from "./audio.js";
 import { renderQueue } from "./render.js";
 import { closeCtx } from "./context-menu.js";
 import { closePlaylistPicker } from "./playlists.js";
+import { trapModalFocus } from "./modal-focus.js";
 
 const SHORTCUTS = [
   {
@@ -61,6 +62,7 @@ document.body.appendChild(overlay);
 
 let isOpen = false;
 let closeTimer = null;
+let releaseShortcutFocus = null;
 
 function buildOverlay() {
   overlay.innerHTML = `
@@ -97,6 +99,8 @@ export function openShortcuts() {
   clearTimeout(closeTimer);
   buildOverlay();
   overlay.style.display = "flex";
+  releaseShortcutFocus?.();
+  releaseShortcutFocus = trapModalFocus(overlay, { onClose: closeShortcuts });
   requestAnimationFrame(() => {
     overlay.classList.add("is-open");
     document.getElementById("shortcutGlass")?.classList.add("is-open");
@@ -106,6 +110,8 @@ export function openShortcuts() {
 export function closeShortcuts() {
   if (!isOpen) return;
   isOpen = false;
+  releaseShortcutFocus?.();
+  releaseShortcutFocus = null;
   overlay.classList.remove("is-open");
   document.getElementById("shortcutGlass")?.classList.remove("is-open");
   clearTimeout(closeTimer);
