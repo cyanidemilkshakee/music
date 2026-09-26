@@ -1,6 +1,8 @@
 // ── Sort & Filter ────────────────────────────────────────────────────────────
 import { state } from "./state.js";
 import { activeGroup, activePlaylist } from "./helpers.js";
+import { matchesTrackFilters } from "./filters.js";
+import { isFavorite } from "./favorites.js";
 
 /** Importation/modification timestamp for "recently added" sorting */
 export function recentTime(track) {
@@ -68,6 +70,8 @@ export function getVisibleTracks() {
       [t.title, t.artist, t.album].join(" ").toLowerCase().includes(q)
     );
   }
+
+  tracks = tracks.filter(track => matchesTrackFilters(track, isFavorite));
 
   if (state.activeView === "recent" && !group && !playlist) {
     return [...tracks].sort((a, b) => recentTime(b) - recentTime(a));
