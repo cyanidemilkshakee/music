@@ -26,5 +26,10 @@ export const state = {
   history: [],
   searchReturn: null,
   playbackError: "",
-  buffering: false
+  buffering: false,
+  recentIds: [],
+  gridPageSize: 150,
+  gridLimit: 150,
+  filters: { genre: "", year: "", codec: "", duration: "", favorite: false, recentlyPlayed: false },
+  librarySources: []
 };
