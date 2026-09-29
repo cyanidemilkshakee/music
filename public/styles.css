@@ -1932,3 +1932,15 @@ button { color: inherit; }
 .fs-artist, .fs-time-label { color: rgba(53,72,97,.68); }
 .fs-close-btn { color: var(--text-base); background: rgba(255,255,255,.78); }
 .fs-play-btn { background: var(--accent); color: #fff; }
+
+/* ── Unified text color ───────────────────────────────────────────────────── */
+body,
+body * {
+  color: #1c1c1c !important;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #1c1c1c !important;
+  opacity: 1;
+}
