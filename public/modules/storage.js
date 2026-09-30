@@ -34,12 +34,3 @@ export function setStorage(key, value) {
     // Private browsing or quota errors should not break playback.
   }
 }
-
-export function removeStorage(key) {
-  memoryStore.delete(key);
-  try {
-    if (canUseLocalStorage) window.localStorage.removeItem(key);
-  } catch {
-    // Ignore storage failures.
-  }
-}
