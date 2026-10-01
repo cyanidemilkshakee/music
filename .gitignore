@@ -19,3 +19,4 @@ backend/test_data_api/
 .env
 .env.local
 .env.*
+!.env.example
