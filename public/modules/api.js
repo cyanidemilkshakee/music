@@ -17,8 +17,8 @@ function timeoutSignal(timeoutMs) {
 }
 
 function mergeSignals(signalA, signalB) {
-  if (!signalA) return signalB;
-  if (!signalB) return signalA;
+  if (!signalA) return { signal: signalB, cleanup() {} };
+  if (!signalB) return { signal: signalA, cleanup() {} };
   const controller = new AbortController();
   const abort = event => {
     const source = event?.target;
@@ -30,16 +30,27 @@ function mergeSignals(signalA, signalB) {
     signalA.addEventListener("abort", abort, { once: true });
     signalB.addEventListener("abort", abort, { once: true });
   }
-  return controller.signal;
+  return {
+    signal: controller.signal,
+    cleanup() {
+      signalA.removeEventListener("abort", abort);
+      signalB.removeEventListener("abort", abort);
+    }
+  };
 }
 
 async function readResponseBody(res) {
   const contentType = res.headers.get("content-type") || "";
   if (res.status === 204) return {};
-  if (contentType.includes("application/json")) {
-    return res.json().catch(() => ({}));
+  if (contentType.includes("application/json") || contentType.includes("+json")) {
+    try {
+      return await res.json();
+    } catch (error) {
+      if (error?.name === "AbortError" || error?.name === "TimeoutError") throw error;
+      throw new ApiError("The server returned an invalid response.", { status: res.status });
+    }
   }
-  return { error: await res.text().catch(() => "") };
+  return { error: await res.text() };
 }
 
 export async function api(path, options = {}) {
@@ -51,36 +62,37 @@ export async function api(path, options = {}) {
   } = options;
 
   const timeout = timeoutSignal(timeoutMs);
-  const requestHeaders = { ...headers };
-  if (fetchOptions.body && !requestHeaders["Content-Type"]) {
-    requestHeaders["Content-Type"] = "application/json";
+  const merged = mergeSignals(signal, timeout?.controller.signal);
+  const requestHeaders = new Headers(headers);
+  if (fetchOptions.body && !requestHeaders.has("Content-Type")) {
+    requestHeaders.set("Content-Type", "application/json");
   }
 
-  let res;
   try {
-    res = await fetch(path, {
+    const res = await fetch(path, {
       ...fetchOptions,
       headers: requestHeaders,
-      signal: mergeSignals(signal, timeout?.controller.signal)
+      signal: merged.signal
     });
+    const data = await readResponseBody(res);
+    if (!res.ok) {
+      throw new ApiError(data.detail || data.error || `Request failed (${res.status}).`, {
+        status: res.status,
+        requestId: data.requestId || res.headers.get("x-request-id") || ""
+      });
+    }
+    return data;
   } catch (error) {
+    if (error instanceof ApiError) throw error;
     if (signal?.aborted) {
       throw error;
     }
-    if (error?.name === "AbortError" || error?.name === "TimeoutError") {
+    if (timeout?.controller.signal.aborted || error?.name === "AbortError" || error?.name === "TimeoutError") {
       throw new ApiError("The request took too long. Please try again.");
     }
     throw new ApiError("Could not reach the Local Amp server. Is it running on port 1111?");
   } finally {
+    merged.cleanup();
     if (timeout?.timer) clearTimeout(timeout.timer);
   }
-
-  const data = await readResponseBody(res);
-  if (!res.ok) {
-    throw new ApiError(data.detail || data.error || `Request failed (${res.status}).`, {
-      status: res.status,
-      requestId: data.requestId || res.headers.get("x-request-id") || ""
-    });
-  }
-  return data;
 }
