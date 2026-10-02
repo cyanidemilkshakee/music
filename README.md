@@ -43,6 +43,7 @@ Local Amp listens on `127.0.0.1` by default. The `HOST` value must be a loopback
 | `LOW_LATENCY_STREAMING` | `true` | Stream a track through FFmpeg as it plays. Set to `false` to decode the full track into the local cache first. |
 | `SCAN_CONCURRENCY` | `4` | Maximum simultaneous metadata probes during import. |
 | `TRANSCODE_CONCURRENCY` | `2` | Maximum simultaneous full-track decodes. |
+| `STREAM_CONCURRENCY` | `8` | Maximum simultaneous FFmpeg stream and artwork processes. |
 | `MAX_SCAN_FILES` | `100000` | Upper limit on audio files considered in one import. |
 | `MAX_SCAN_FAILURES` | `10000` | Upper limit on individual import failures retained for reporting. |
 | `FFPROBE_TIMEOUT_MS` | `10000` | Per-file metadata probe timeout. |
@@ -55,7 +56,7 @@ Local Amp listens on `127.0.0.1` by default. The `HOST` value must be a loopback
 1. Select **Add Folder**, then choose a folder with the native Windows picker, drag a folder from File Explorer, or enter an absolute path. Imported folders are kept as saved sources for one-click rescans.
 2. Import progress is streamed to the interface. A failed scan reports its error without leaving the sheet waiting.
 3. Use the filter panel to narrow the library by genre, year, codec, duration, favorites, or recently played tracks.
-4. Choose a track to play it. The queue persists between sessions, supports drag-and-drop reordering, and has a full track-details view with embedded metadata and lyrics when available.
+4. Choose a track to play it. The queue persists between sessions and supports drag-and-drop reordering. Use a track's context menu to refresh its embedded metadata.
 5. Use the sidebar to create playlists and the track context menu to add tracks or refresh metadata.
 
 Imports report a terminal error when a folder cannot be opened, rather than leaving the interface waiting for progress.
