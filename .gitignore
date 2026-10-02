@@ -20,3 +20,9 @@ backend/test_data_api/
 .env.local
 .env.*
 !.env.example
+dist/
+data/recent.json
+test-results/
+coverage/
+public/assets/default-cover.png
+public/assets/fonts/Roboto-Regular.ttf
