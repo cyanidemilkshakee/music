@@ -16,6 +16,7 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 2,
         sql: include_str!("migrations/002_library_sources.sql"),
     },
+    Migration { version: 3, sql: include_str!("migrations/003_reliability.sql") },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
