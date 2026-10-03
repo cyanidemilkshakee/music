@@ -24,5 +24,3 @@ dist/
 data/recent.json
 test-results/
 coverage/
-public/assets/default-cover.png
-public/assets/fonts/Roboto-Regular.ttf
