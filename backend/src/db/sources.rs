@@ -33,12 +33,12 @@ pub fn remember_library_source(conn: &mut Connection, path: &str) -> Result<(), 
     conn.execute(
         "INSERT INTO library_sources (id, path, addedAt, lastScannedAt)
          VALUES (?, ?, ?, ?)
-         ON CONFLICT(path) DO UPDATE SET lastScannedAt = excluded.lastScannedAt",
+         ON CONFLICT(path) DO NOTHING",
         params![
             uuid::Uuid::new_v4().to_string(),
             path,
             now,
-            chrono::Utc::now().to_rfc3339()
+            Option::<String>::None
         ],
     )?;
     Ok(())

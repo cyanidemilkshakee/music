@@ -1,20 +1,11 @@
-use axum::{
-    http::{header::CACHE_CONTROL, HeaderValue},
-    middleware as axum_middleware,
-    Router,
-};
+use axum::{middleware as axum_middleware, Router};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tower::{limit::ConcurrencyLimitLayer, ServiceBuilder};
-use tower_http::{
-    compression::CompressionLayer,
-    services::{ServeDir, ServeFile},
-    limit::RequestBodyLimitLayer,
-    set_header::SetResponseHeaderLayer,
-};
+use tower::limit::ConcurrencyLimitLayer;
+use tower_http::{compression::CompressionLayer, limit::RequestBodyLimitLayer};
 use tracing::{info, Level};
-use tracing_subscriber::{FmtSubscriber, EnvFilter};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
@@ -23,10 +14,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod config;
 mod db;
 mod error;
+mod metrics;
 mod middleware;
 mod routes;
 mod services;
-mod metrics;
 
 use crate::config::Config;
 use crate::routes::AppState;
@@ -44,70 +35,89 @@ async fn main() -> anyhow::Result<()> {
     let _ = tracing::subscriber::set_global_default(subscriber);
 
     info!("Starting Local Amp Backend (Rust)");
+    let started_at = std::time::Instant::now();
 
-    crate::metrics::install();
+    if let Err(error) = crate::metrics::install() {
+        tracing::warn!(%error, "Prometheus metrics are unavailable");
+    }
 
-    let config_val = Config::from_env().unwrap_or_else(|errs| {
-        for e in errs {
-            tracing::error!("Config error: {}", e);
+    let config_val = Config::from_env().map_err(|errors| {
+        for error in &errors {
+            tracing::error!("Config error: {}", error);
         }
-        std::process::exit(1);
-    });
-    
+        anyhow::anyhow!("Invalid configuration")
+    })?;
+
     let config = Arc::new(config_val);
     std::fs::create_dir_all(&config.data_dir)?;
     let db_path = config.data_dir.join("local-amp.db");
 
     let pool = db::pool::build_pool(&db_path)?;
-    let mut conn = pool.get()?;
-    db::migrations::run_migrations(&mut conn)?;
+    {
+        let conn = pool.get()?;
+        db::reliability::recover_interrupted_jobs(&conn)?;
+    }
 
     let ffmpeg = FfmpegService::new(config.clone());
-    let scanner = Arc::new(ScannerService::new(config.clone(), ffmpeg.clone(), pool.clone()));
+    let scanner = Arc::new(ScannerService::new(
+        config.clone(),
+        ffmpeg.clone(),
+        pool.clone(),
+    ));
 
+    let shutdown = tokio_util::sync::CancellationToken::new();
     let app_state = AppState {
+        started_at,
         config: config.clone(),
         pool,
-        ffmpeg,
-        scanner,
+        ffmpeg: ffmpeg.clone(),
+        scanner: scanner.clone(),
+        session_token: Arc::new(uuid::Uuid::new_v4().to_string()),
+        shutdown: shutdown.clone(),
     };
-
-    let current_dir = std::env::current_dir()?;
-    let public_dir = current_dir.parent().unwrap_or(&current_dir).join("public");
-
-    let serve_dir = ServiceBuilder::new()
-        .layer(SetResponseHeaderLayer::if_not_present(
-            CACHE_CONTROL,
-            HeaderValue::from_static("no-store, must-revalidate"),
-        ))
-        .service(
-            ServeDir::new(&public_dir)
-                .not_found_service(ServeFile::new(public_dir.join("index.html"))),
-        );
 
     let app = Router::new()
         .nest("/api", routes::media::router())
         .nest("/api", routes::api::router())
         .nest("/api", routes::library::router())
+        .nest("/api", routes::management::router())
         .nest("/metrics", metrics::router())
-        .fallback_service(serve_dir)
-        .with_state(app_state)
+        .fallback(routes::assets::serve)
+        .with_state(app_state.clone())
         // Streaming playback and scan progress may legitimately outlive a normal
         // request timeout. The FFmpeg and ffprobe operations enforce their own
         // bounded timeouts, while this layer protects server capacity.
         .layer(ConcurrencyLimitLayer::new(config.max_concurrent_requests))
-        .layer(axum_middleware::from_fn(middleware::compression_bypass_middleware))
         .layer(CompressionLayer::new())
+        .layer(axum_middleware::from_fn(
+            middleware::compression_bypass_middleware,
+        ))
         .layer(RequestBodyLimitLayer::new(config.json_limit_bytes))
-        .layer(axum_middleware::from_fn(middleware::security_headers_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            config.json_limit_bytes,
+        ))
+        .layer(axum_middleware::from_fn(
+            middleware::api_response_middleware,
+        ))
+        .layer(axum_middleware::from_fn(
+            middleware::security_headers_middleware,
+        ))
+        .layer(axum_middleware::from_fn_with_state(
+            app_state,
+            middleware::local_access_middleware,
+        ))
         .layer(axum_middleware::from_fn(middleware::request_id_middleware));
 
-    let addr = format!("{}:{}", config.host, config.port);
-    let listener = TcpListener::bind(&addr).await?;
+    let addr = std::net::SocketAddr::new(config.host, config.port);
+    let listener = TcpListener::bind(addr).await?;
     info!("Listening on http://{}", addr);
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            tokio::select! { _ = shutdown_signal() => {}, _ = shutdown.cancelled() => {} }
+            scanner.cancel_active().await;
+            ffmpeg.shutdown();
+        })
         .await?;
 
     Ok(())
@@ -115,17 +125,20 @@ async fn main() -> anyhow::Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .unwrap_or(());
+        signal::ctrl_c().await.unwrap_or(());
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .unwrap_or_else(|_| panic!("failed to install signal handler"))
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "Failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(not(unix))]
@@ -135,6 +148,6 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-    
+
     info!("Shutting down Local Amp.");
 }
