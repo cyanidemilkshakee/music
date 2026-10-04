@@ -1,0 +1,35 @@
+name: Windows installer
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+      - run: choco install ffmpeg innosetup -y --no-progress
+      - run: npm run lint
+      - run: npm test
+      - run: npx playwright install chromium
+      - run: npm run test:browser
+      - run: npm run build
+      - shell: pwsh
+        run: ./scripts/Build-WindowsInstaller.ps1 -SkipBuild
+      - name: Verify install, upgrade and uninstall
+        shell: pwsh
+        run: ./scripts/Test-WindowsInstaller.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalAmp-Windows-Installer
+          path: dist/*
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-failure-windows
+          path: test-results/*
