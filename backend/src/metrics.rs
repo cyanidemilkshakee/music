@@ -4,11 +4,14 @@ use std::sync::OnceLock;
 
 static METRICS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
-pub fn install() {
+pub fn install() -> Result<(), String> {
     let builder = PrometheusBuilder::new();
-    if let Ok(handle) = builder.install_recorder() {
-        let _ = METRICS_HANDLE.set(handle);
-    }
+    let handle = builder
+        .install_recorder()
+        .map_err(|error| error.to_string())?;
+    METRICS_HANDLE
+        .set(handle)
+        .map_err(|_| "Metrics handle was already initialized".to_string())
 }
 
 pub fn router() -> Router<crate::routes::AppState> {

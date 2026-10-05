@@ -26,13 +26,10 @@ pub enum AppError {
         exit_code: Option<i32>,
         stderr: String,
     },
-    #[error("Media tool unavailable")]
-    #[allow(dead_code)]
-    MediaUnavailable,
+    #[error("{tool} not available")]
+    MediaUnavailable { tool: &'static str },
     #[error("Invalid request body")]
     Json(#[from] serde_json::Error),
-    #[error("Validation error")]
-    Validation(#[from] validator::ValidationErrors),
     #[error("Operation timed out")]
     Timeout(#[from] tokio::time::error::Elapsed),
     #[error("Internal task failed")]
@@ -41,31 +38,81 @@ pub enum AppError {
     Anyhow(#[from] anyhow::Error),
 }
 
+impl AppError {
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self::Http {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+            detail: None,
+        }
+    }
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::Http {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+            detail: None,
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, error_message, detail) = match self {
-            AppError::Http { status, message, detail } => {
-                (status, message, detail)
+            AppError::Http {
+                status,
+                message,
+                detail,
+            } => (status, message, detail),
+            AppError::Json(ref err) => (
+                StatusCode::BAD_REQUEST,
+                "Invalid JSON body".to_string(),
+                Some(err.to_string()),
+            ),
+            AppError::MediaUnavailable { tool } => {
+                if tool == "Folder picker" {
+                    return AppError::Http { status: StatusCode::SERVICE_UNAVAILABLE, message: "Windows folder picker is unavailable. Enter an absolute folder path instead.".into(), detail: None }.into_response();
+                }
+                let setting = if tool == "FFprobe" {
+                    "FFPROBE_PATH"
+                } else {
+                    "FFMPEG_PATH"
+                };
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("{tool} not available. Install FFmpeg or set {setting}."),
+                    None,
+                )
             }
-            AppError::Validation(ref errs) => {
-                (StatusCode::BAD_REQUEST, "Validation Error".to_string(), Some(errs.to_string()))
+            AppError::Timeout(_) => (
+                StatusCode::REQUEST_TIMEOUT,
+                "Request timed out".to_string(),
+                None,
+            ),
+            AppError::Media {
+                message,
+                exit_code,
+                stderr,
+            } => {
+                tracing::warn!(%message, ?exit_code, %stderr, "Media operation failed");
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    message,
+                    Some(stderr.chars().take(2000).collect()),
+                )
             }
-            AppError::Json(ref err) => {
-                (StatusCode::BAD_REQUEST, "Invalid JSON body".to_string(), Some(err.to_string()))
-            }
-            AppError::MediaUnavailable => {
-                (StatusCode::SERVICE_UNAVAILABLE, "FFmpeg not available. Install FFmpeg or set FFMPEG_PATH.".to_string(), None)
-            }
-            AppError::Timeout(_) => {
-                (StatusCode::REQUEST_TIMEOUT, "Request timed out".to_string(), None)
-            }
-            AppError::Io(ref e) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "I/O Error".to_string(), Some(e.to_string()))
-            }
+            AppError::Io(ref e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "I/O Error".to_string(),
+                Some(e.to_string()),
+            ),
             // For all other errors, we return a 500 and log the error.
             _ => {
                 error!(error = ?self, "Internal server error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string(), None)
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                    None,
+                )
             }
         };
 
