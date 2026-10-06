@@ -35,7 +35,7 @@ dotenvy = "0.15.7"
 mimalloc = { version = "0.1.43", default-features = false }
 
 [dev-dependencies]
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [profile.release]
 opt-level       = 3

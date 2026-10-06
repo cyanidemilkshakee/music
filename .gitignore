@@ -1,4 +1,7 @@
 node_modules/
+
+# Runtime library data (keep local libraries out of source control)
+/data/
 **/data/cache/
 *.db
 *.db-shm
@@ -21,6 +24,5 @@ backend/test_data_api/
 .env.*
 !.env.example
 dist/
-data/recent.json
 test-results/
 coverage/
