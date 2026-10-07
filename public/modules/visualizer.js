@@ -1,24 +1,50 @@
+import { trapModalFocus } from "./modal-focus.js";
+import { api } from "./api.js";
+import { state } from "./state.js";
+import { getStorage } from "./storage.js";
 import { el } from "./dom.js";
 
 let audioContext;
 let analyser;
 let source;
 let frequencies;
-let currentThemeColor = "#ffa551";
+const THEME_COLOR = "#ffa551";
 let artwork = null;
 let rotation = 0;
-let running = false;
+let running = false, frame = 0, artRequest = 0, releaseFocus = null, gainNode, gainRequest = 0;
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+function schedule() {
+  if(running || document.hidden || el.fullScreenPlayer?.classList.contains("is-hidden")) return;
+  running=true; frame=requestAnimationFrame(renderLoop);
+}
+async function setGain() {
+  const request = ++gainRequest;
+  if(!gainNode) return;
+  gainNode.gain.value=1;
+  if(getStorage("amp-replaygain","off")!=="track" || !state.currentTrackId) return;
+  const id=state.currentTrackId;
+  try {
+    const {track}=await api("/api/tracks/"+encodeURIComponent(id));
+    if(state.currentTrackId!==id || request !== gainRequest || getStorage('amp-replaygain','off') !== 'track') return;
+    const db=Number.parseFloat(track.tags?.replaygain_track_gain);
+    const peak=Number.parseFloat(track.tags?.replaygain_track_peak);
+    if(Number.isFinite(db)) gainNode.gain.value=Math.min(1,10**(db/20),Number.isFinite(peak) && peak>0 ? 1/peak : 1);
+  } catch { /* Missing tags leave the source level unchanged. */ }
+}
 
 export function initVisualizer() {
+  document.addEventListener('playback-preferences-changed', setGain);
+  document.addEventListener('library-updated', setGain);
+  window.addEventListener('storage', event => { if (event.key === 'amp-replaygain') setGain(); });
   el.fsExpandBtn?.addEventListener("click", openFullScreen);
   el.fsCloseBtn?.addEventListener("click", closeFullScreen);
-  el.audio.addEventListener("play", initAudioContext, { once: true });
+  el.audio.addEventListener("play", () => { try { initAudioContext(); setGain(); schedule(); } catch(error) { console.warn("Visualizer unavailable",error); } });
+  el.audio.addEventListener("pause", schedule);
+  document.addEventListener("visibilitychange", () => { if(document.hidden) {cancelAnimationFrame(frame);running=false;} else schedule(); });
+  reducedMotion.addEventListener("change",()=>{cancelAnimationFrame(frame);running=false;schedule();});
   window.addEventListener("resize", resizeBackground);
   resizeBackground();
-  if (!running) {
-    running = true;
-    requestAnimationFrame(renderLoop);
-  }
+  schedule();
 }
 
 function initAudioContext() {
@@ -31,32 +57,27 @@ function initAudioContext() {
   analyser.fftSize = 256;
   frequencies = new Uint8Array(analyser.frequencyBinCount);
   source = audioContext.createMediaElementSource(el.audio);
-  source.connect(analyser);
-  analyser.connect(audioContext.destination);
-}
-
-export function updateThemeColor(hex) {
-  currentThemeColor = hex;
-  document.documentElement.style.setProperty("--theme-accent", hex);
-  document.documentElement.style.setProperty("--theme-bg-1", hex);
+  gainNode=audioContext.createGain();
+  source.connect(gainNode);gainNode.connect(analyser);analyser.connect(audioContext.destination);
 }
 
 export function updateVinylArt(url) {
+  const request=++artRequest;
   if (!url) {
     artwork = null;
     return;
   }
   const image = new Image();
   image.decoding = "async";
-  image.onload = () => { artwork = image; };
-  image.onerror = () => { artwork = null; };
+  image.onload = () => { if(request===artRequest) {artwork=image;schedule();} };
+  image.onerror = () => { if(request===artRequest) artwork=null; };
   image.src = url;
 }
 
 function resizeBackground() {
   const canvas = el.bgCanvas;
   if (!canvas) return;
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = Math.min(window.devicePixelRatio || 1,2);
   canvas.width = Math.round(window.innerWidth * dpr);
   canvas.height = Math.round(window.innerHeight * dpr);
   canvas.style.width = `${window.innerWidth}px`;
@@ -75,15 +96,15 @@ function drawBackground(pulse) {
   const canvas = el.bgCanvas;
   if (!canvas) return;
   const context = canvas.getContext("2d");
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = Math.min(window.devicePixelRatio || 1,2);
   const width = canvas.width / dpr;
   const height = canvas.height / dpr;
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   context.clearRect(0, 0, width, height);
 
   const gradient = context.createRadialGradient(width * .5, height * .42, Math.min(width, height) * .04, width * .5, height * .42, Math.max(width, height) * (.66 + pulse * .08));
-  gradient.addColorStop(0, currentThemeColor);
-  gradient.addColorStop(.32, "#171724");
+  gradient.addColorStop(0, THEME_COLOR);
+  gradient.addColorStop(.32, "#171717");
   gradient.addColorStop(1, "#050508");
   context.fillStyle = gradient;
   context.fillRect(0, 0, width, height);
@@ -111,11 +132,11 @@ function drawBackground(pulse) {
     const size = radius * 1.04;
     context.drawImage(artwork, -size / 2, -size / 2, size, size);
   } else {
-    context.fillStyle = currentThemeColor;
+    context.fillStyle = THEME_COLOR;
     context.fill();
   }
   context.restore();
-  context.fillStyle = "#e9e9ef";
+  context.fillStyle = "#e9e9e9";
   context.beginPath();
   context.arc(0, 0, radius * .06, 0, Math.PI * 2);
   context.fill();
@@ -126,7 +147,7 @@ function drawWaveform(canvas, color) {
   if (!canvas || !frequencies) return;
   const rect = canvas.getBoundingClientRect();
   if (!rect.width || !rect.height) return;
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = Math.min(window.devicePixelRatio || 1,2);
   if (canvas.width !== Math.round(rect.width * dpr) || canvas.height !== Math.round(rect.height * dpr)) {
     canvas.width = Math.round(rect.width * dpr);
     canvas.height = Math.round(rect.height * dpr);
@@ -143,22 +164,27 @@ function drawWaveform(canvas, color) {
 }
 
 function renderLoop() {
-  requestAnimationFrame(renderLoop);
+  running=false;
+  if(document.hidden || el.fullScreenPlayer?.classList.contains("is-hidden")) return;
   const pulse = energy();
-  if (!el.audio.paused) rotation += .01 + pulse * .02;
+  if (!el.audio.paused && !reducedMotion.matches) rotation += .01 + pulse * .02;
   drawBackground(pulse);
   if (!el.audio.paused) {
     drawWaveform(el.fsWaveformCanvas, "#ffffff");
   }
+  if(!el.audio.paused && !reducedMotion.matches) schedule();
 }
 
 function openFullScreen() {
   el.fullScreenPlayer?.classList.remove("is-hidden");
   el.fullScreenPlayer?.setAttribute("aria-hidden", "false");
   resizeBackground();
+  releaseFocus=trapModalFocus(el.fullScreenPlayer,{onClose:closeFullScreen,initialFocus:el.fsCloseBtn});
+  schedule();
 }
 
 function closeFullScreen() {
+  releaseFocus?.();releaseFocus=null;cancelAnimationFrame(frame);running=false;
   el.fullScreenPlayer?.classList.add("is-hidden");
   el.fullScreenPlayer?.setAttribute("aria-hidden", "true");
 }

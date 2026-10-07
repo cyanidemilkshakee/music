@@ -1,5 +1,5 @@
 const toastEl = document.createElement("div");
-toastEl.className = "playback-toast";
+toastEl.className = "toast";
 toastEl.setAttribute("role", "status");
 toastEl.setAttribute("aria-live", "polite");
 document.body.appendChild(toastEl);

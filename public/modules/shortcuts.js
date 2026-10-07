@@ -93,7 +93,7 @@ function buildOverlay() {
   document.getElementById("shortcutClose")?.addEventListener("click", closeShortcuts, { once: true });
 }
 
-export function openShortcuts() {
+function openShortcuts() {
   if (isOpen) return;
   isOpen = true;
   clearTimeout(closeTimer);
@@ -107,7 +107,7 @@ export function openShortcuts() {
   });
 }
 
-export function closeShortcuts() {
+function closeShortcuts() {
   if (!isOpen) return;
   isOpen = false;
   releaseShortcutFocus?.();
@@ -120,7 +120,7 @@ export function closeShortcuts() {
   }, 300);
 }
 
-export function toggleShortcuts() {
+function toggleShortcuts() {
   isOpen ? closeShortcuts() : openShortcuts();
 }
 
@@ -129,11 +129,14 @@ overlay.addEventListener("click", event => {
 });
 
 document.addEventListener("keydown", event => {
+  if (event.defaultPrevented) return;
   const tag = document.activeElement?.tagName || "";
-  const inInput = ["INPUT", "TEXTAREA"].includes(tag);
+  const inInput = ["INPUT", "TEXTAREA", "SELECT", "BUTTON", "A", "ARTICLE"].includes(tag) || document.activeElement?.isContentEditable;
+  const modal = document.querySelector('[aria-modal="true"]:not([aria-hidden="true"]):not(.is-hidden)');
+  if (modal && modal.getClientRects().length) return;
 
   if (event.key === "?" && !event.ctrlKey && !event.metaKey) {
-    if (!inInput || event.shiftKey) {
+    if (!inInput) {
       event.preventDefault();
       toggleShortcuts();
       return;

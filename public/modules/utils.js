@@ -1,5 +1,5 @@
 // ── Utility / Helper Functions ────────────────────────────────────────────────
-import { state, DEFAULT_COVER } from "./state.js";
+import { DEFAULT_COVER } from "./state.js";
 
 /** HTML-escape a value for safe interpolation into innerHTML */
 export function esc(v) {
@@ -21,7 +21,7 @@ export function fmt(secs) {
 /** Get artwork URL or default cover */
 export function coverUrl(track) {
   return track?.hasArtwork
-    ? `/api/artwork/${encodeURIComponent(track.id)}`
+    ? `/api/artwork/${encodeURIComponent(track.id)}?v=${encodeURIComponent(track.metadataExtractedAt || track.modifiedAt || "0")}`
     : DEFAULT_COVER;
 }
 
@@ -41,13 +41,17 @@ export function makeGroupKey(type, label) {
   return `${type}:${String(label || "").trim().toLowerCase()}`;
 }
 
+export function albumKey(track) {
+  return makeGroupKey("album", JSON.stringify([track.album || "Unknown Album", track.albumArtist || track.artist || "Unknown Artist"]));
+}
+
 /** Build clickable artist/album subtitle HTML for a track card */
 export function trackSubtitle(track) {
   const artist = track?.artist || "Unknown Artist";
   const album  = track?.album;
-  let html = `<span class="nav-link" data-group-type="artist" data-group-key="${esc(makeGroupKey("artist", artist))}">${esc(artist)}</span>`;
+  let html = `<button type="button" class="nav-link" data-group-type="artist" data-group-key="${esc(makeGroupKey("artist", artist))}">${esc(artist)}</button>`;
   if (album) {
-    html += ` - <span class="nav-link" data-group-type="album" data-group-key="${esc(makeGroupKey("album", album))}">${esc(album)}</span>`;
+    html += ` · <button type="button" class="nav-link" data-group-type="album" data-group-key="${esc(albumKey(track))}">${esc(album)}</button>`;
   }
   return html;
 }
