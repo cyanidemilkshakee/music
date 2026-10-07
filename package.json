@@ -1,15 +1,30 @@
 {
   "name": "local-amp",
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "type": "module",
+  "license": "MIT",
   "private": true,
   "description": "A local FFmpeg-backed music player with playlists and metadata extraction.",
   "scripts": {
-    "start": "cd backend && cargo run --release",
-    "build": "cd backend && cargo build --release",
-    "dev": "cd backend && cargo watch -x run",
-    "test": "cd backend && cargo test",
-    "bench": "cd backend && cargo bench",
-    "lint": "cd backend && cargo clippy -- -D warnings",
-    "audit": "cd backend && cargo deny check"
+    "start": "node scripts/build.js --run",
+    "build": "node scripts/build.js",
+    "dev": "cd backend && cargo run --locked",
+    "test": "node --experimental-test-isolation=none --test tests/*.test.js && cd backend && cargo test --locked",
+    "test:frontend": "node --experimental-test-isolation=none --test tests/*.test.js",
+    "test:api": "node tests/browser-smoke.js --api-only",
+    "test:browser": "node tests/browser-smoke.js",
+    "bench": "node scripts/benchmark.js",
+    "lint:frontend": "eslint public scripts tests eslint.config.js --max-warnings 0 && node scripts/check-frontend-links.js",
+    "lint": "npm run lint:frontend && cd backend && cargo fmt -- --check && cargo clippy --locked --all-targets -- -D warnings",
+    "audit": "cd backend && cargo deny check",
+    "installer": "powershell -NoProfile -File scripts/Build-WindowsInstaller.ps1"
+  },
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  },
+  "devDependencies": {
+    "eslint": "10.12.0",
+    "globals": "17.13.0",
+    "playwright": "1.63.0"
   }
 }
