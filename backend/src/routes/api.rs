@@ -1,5 +1,6 @@
+use super::json::ApiJson;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, patch, post},
@@ -8,7 +9,6 @@ use axum::{
 use serde::Deserialize;
 use std::path::PathBuf;
 use tokio::task::spawn_blocking;
-use validator::Validate;
 
 use super::AppState;
 use crate::db;
@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
         .route("/state", get(get_state))
         .route("/stats", get(get_stats))
         .route("/cache/clear", post(clear_cache))
+        .route("/cache", get(cache_usage))
         .route("/recent", get(get_recent))
         .route("/recent/{id}", post(add_recent))
         .route("/scan", post(scan_directory))
@@ -29,7 +30,10 @@ pub fn router() -> Router<AppState> {
         .route("/playlists/{id}", patch(update_playlist))
         .route("/playlists/{id}", delete(delete_playlist))
         .route("/playlists/{id}/tracks", post(add_track_to_playlist))
-        .route("/playlists/{id}/tracks/{track_id}", delete(remove_track_from_playlist))
+        .route(
+            "/playlists/{id}/tracks/{track_id}",
+            delete(remove_track_from_playlist),
+        )
 }
 
 async fn get_health(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
@@ -37,41 +41,31 @@ async fn get_health(State(state): State<AppState>) -> Result<impl IntoResponse, 
     let db_health = spawn_blocking(move || {
         let conn = pool.get()?;
         db::get_health(&conn)
-    }).await??;
+    })
+    .await??;
 
-    let ffmpeg_v = tokio::time::timeout(
-        std::time::Duration::from_millis(state.config.ffprobe_timeout_ms),
-        tokio::process::Command::new(&state.config.ffmpeg_path).arg("-version").output()
-    ).await;
-    
-    let ffprobe_v = tokio::time::timeout(
-        std::time::Duration::from_millis(state.config.ffprobe_timeout_ms),
-        tokio::process::Command::new(&state.config.ffprobe_path).arg("-version").output()
-    ).await;
-
-    let get_ver = |res: std::result::Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed>| {
-        match res {
-            Ok(Ok(out)) if out.status.success() => {
-                let s = String::from_utf8_lossy(&out.stdout).to_string();
-                (true, s.lines().next().unwrap_or("").to_string())
-            }
-            Ok(Ok(out)) => (false, String::from_utf8_lossy(&out.stderr).to_string()),
-            Ok(Err(e)) => (false, e.to_string()),
-            Err(e) => (false, e.to_string()),
-        }
-    };
-
-    let (ffmpeg_ok, ffmpeg_str) = get_ver(ffmpeg_v);
-    let (ffprobe_ok, ffprobe_str) = get_ver(ffprobe_v);
-
+    let tools = state.ffmpeg.tool_health().await;
+    let ffmpeg_ok = tools["ffmpeg"]["ok"] == true;
+    let ffprobe_ok = tools["ffprobe"]["ok"] == true;
+    let ffmpeg_str = tools["ffmpeg"].clone();
+    let ffprobe_str = tools["ffprobe"].clone();
     let all_ok = ffmpeg_ok && ffprobe_ok && db_health.ok;
 
     let json = serde_json::json!({
         "ok": all_ok,
+        "checks": {
+            "database": db_health.ok,
+            "ffmpeg": ffmpeg_ok,
+            "ffprobe": ffprobe_ok
+        },
         "ffmpeg": ffmpeg_str,
         "ffprobe": ffprobe_str,
         "database": db_health,
-        "uptime": 0 // TODO if we want true uptime
+        "uptime": state.started_at.elapsed().as_secs(),
+        "limits": {
+            "jsonLimitBytes": state.config.json_limit_bytes,
+            "m3uTextBytes": super::management::M3U_TEXT_BYTES
+        }
     });
 
     if all_ok {
@@ -81,19 +75,44 @@ async fn get_health(State(state): State<AppState>) -> Result<impl IntoResponse, 
     }
 }
 
-async fn get_state(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
-    let pool = state.pool.clone();
-    let (tracks, playlists) = spawn_blocking(move || {
-        let conn = pool.get()?;
-        let t = db::get_all_tracks(&conn)?;
-        let p = db::get_all_playlists(&conn)?;
-        Ok::<_, AppError>((t, p))
-    }).await??;
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StateQuery {
+    #[serde(default = "include_tracks")]
+    include_tracks: bool,
+}
+fn include_tracks() -> bool {
+    true
+}
 
-    Ok(Json(serde_json::json!({
-        "tracks": tracks,
-        "playlists": playlists
-    })))
+async fn get_state(
+    State(state): State<AppState>,
+    query: Result<Query<StateQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    let Query(query) =
+        query.map_err(|_| AppError::bad_request("Invalid state query parameters."))?;
+    let pool = state.pool.clone();
+    let value = spawn_blocking(move || {
+        let conn = pool.get()?;
+        let transaction = conn.unchecked_transaction()?;
+        let tracks = if query.include_tracks {
+            db::get_library_tracks(&transaction)?
+        } else {
+            Vec::new()
+        };
+        let value = serde_json::json!({
+            "tracks": tracks,
+            "trackIds": db::library_query::all_ids(&transaction)?,
+            "playlists": db::get_all_playlists(&transaction)?,
+            "favorites": db::reliability::favorites(&transaction)?,
+            "recentIds": db::get_recent_ids(&transaction)?,
+            "facets": db::library_query::facets(&transaction)?
+        });
+        transaction.commit()?;
+        Ok::<_, AppError>(value)
+    })
+    .await??;
+    Ok(Json(value))
 }
 
 async fn get_stats(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
@@ -101,7 +120,8 @@ async fn get_stats(State(state): State<AppState>) -> Result<impl IntoResponse, A
     let stats = spawn_blocking(move || {
         let conn = pool.get()?;
         db::get_stats(&conn)
-    }).await??;
+    })
+    .await??;
 
     Ok(Json(stats))
 }
@@ -113,35 +133,30 @@ async fn clear_cache(State(state): State<AppState>) -> Result<impl IntoResponse,
         "bytes": bytes
     })))
 }
+async fn cache_usage(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    let (files, bytes) = state.ffmpeg.cache_usage().await?;
+    Ok(Json(
+        serde_json::json!({"files":files,"bytes":bytes,"maxBytes":state.config.cache_max_bytes}),
+    ))
+}
 
 async fn get_recent(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     let pool = state.pool.clone();
     let recent_tracks = spawn_blocking(move || {
         let conn = pool.get()?;
-        let ids = db::get_recent_ids(&conn)?;
-        let mut tracks = Vec::new();
-        for id in ids.iter().take(20) {
-            if let Some(t) = db::get_track_by_id(&conn, id)? {
-                tracks.push(t);
-            }
-        }
-        Ok::<_, AppError>(tracks)
-    }).await??;
+        db::get_recent_tracks(&conn)
+    })
+    .await??;
 
     Ok(Json(serde_json::json!({
         "recentTracks": recent_tracks
     })))
 }
 
-#[derive(Deserialize, Validate)]
-struct IdParam {
-    #[validate(length(min = 1, max = 200))]
-    id: String,
-}
-
 fn valid_id(id: &str) -> Result<String, AppError> {
-    let param = IdParam { id: id.to_string() };
-    param.validate()?;
+    if id.is_empty() || id.len() > 200 {
+        return Err(AppError::bad_request("Invalid ID."));
+    }
     Ok(id.to_string())
 }
 
@@ -153,18 +168,20 @@ async fn add_recent(
     let pool = state.pool.clone();
     let recent_ids = spawn_blocking(move || {
         let mut conn = pool.get()?;
-        db::add_recent(&mut conn, &id)?;
+        if !db::add_recent(&mut conn, &id)? {
+            return Err(AppError::not_found("Track not found."));
+        }
         db::get_recent_ids(&conn)
-    }).await??;
+    })
+    .await??;
 
     Ok(Json(serde_json::json!({
         "recentIds": recent_ids
     })))
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Deserialize)]
 struct ScanReq {
-    #[validate(length(min = 1, max = 4096))]
     directory: String,
 }
 
@@ -174,73 +191,65 @@ use std::convert::Infallible;
 
 async fn scan_directory(
     State(state): State<AppState>,
-    Json(payload): Json<ScanReq>,
+    ApiJson(payload): ApiJson<ScanReq>,
 ) -> Result<impl IntoResponse, AppError> {
-    payload.validate()?;
+    if payload.directory.trim().is_empty() || payload.directory.len() > 4096 {
+        return Err(AppError::bad_request(
+            "Enter a folder path of at most 4096 characters.",
+        ));
+    }
     let path = PathBuf::from(payload.directory);
-    let source_path = path.to_string_lossy().to_string();
     let job_id = state.scanner.start_scan(path).await?;
-    let pool = state.pool.clone();
-    spawn_blocking(move || {
-        let mut conn = pool.get()?;
-        db::remember_library_source(&mut conn, &source_path)
-    }).await??;
-    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "jobId": job_id }))))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "jobId": job_id })),
+    ))
 }
 
 async fn scan_stream(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
-    let active_scan = state.scanner.get_active_scan().await;
-    
-        let active = match active_scan {
-            Some(s) if s.job_id == id => s,
-            _ => {
-                return Err(AppError::Http {
-                    status: StatusCode::NOT_FOUND,
-                    message: "No active scan found for this Job ID. The scan may have already completed or the ID is invalid.".to_string(),
-                    detail: None,
-                });
-            }
-        };
-
+    let active = state.scanner.get_scan(&id).await?;
     let rx = active.tx.subscribe();
-    // Subscribe before taking the replay snapshot so an event cannot be lost
-    // between those two steps. An event in both sources is harmless to clients
-    // and is preferable to missing a terminal event.
-    let history_snapshot = active.history.lock().await.clone();
-    let history_has_terminal_event = history_snapshot.iter().any(|event| {
-        matches!(event, crate::services::scanner::ScanEvent::Complete(_) | crate::services::scanner::ScanEvent::Failed { .. })
-    });
-
-    // Build a stream that first replays all past events, then follows live ones
-    let history_stream = stream::iter(history_snapshot)
-        .map(|event| {
-            let json = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
-            Ok::<_, Infallible>(Event::default().data(json))
-        });
-
-    let live_stream = stream::unfold(Some(rx), |rx| async move {
-        let mut rx = rx?;
-        match rx.recv().await {
-            Ok(event) => {
-                let json = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
-                let finished = matches!(event, crate::services::scanner::ScanEvent::Complete(_) | crate::services::scanner::ScanEvent::Failed { .. });
-                Some((Ok(Event::default().data(json)), (!finished).then_some(rx)))
+    let snapshot = active.history.lock().await.clone();
+    let replay = stream::iter(snapshot.clone())
+        .map(|event| Ok(Event::default().data(serde_json::to_string(&event).unwrap_or_default())));
+    let terminal = snapshot.iter().any(|event| event.terminal());
+    let live = stream::unfold(
+        (active, rx, false),
+        |(active, mut rx, finished)| async move {
+            if finished {
+                return None;
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                // Skip lagged messages and continue
-                Some((Ok(Event::default().data("{}")), Some(rx)))
-            }
-        }
-    });
-
-    let combined = if history_has_terminal_event {
-        history_stream.chain(stream::empty()).boxed()
+            let event = loop {
+                tokio::select! {
+                    result = rx.recv() => match result {
+                        Ok(event) => break event,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if let Some(event)=active.history.lock().await.last().cloned() { break event; }
+                        },
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    },
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                        if active.is_done.load(std::sync::atomic::Ordering::SeqCst) {
+                            if let Some(event)=active.history.lock().await.last().cloned() { break event; }
+                            return None;
+                        }
+                    }
+                }
+            };
+            let done = event.terminal();
+            Some((
+                Ok(Event::default().data(serde_json::to_string(&event).unwrap_or_default())),
+                (active, rx, done),
+            ))
+        },
+    );
+    let combined = if terminal {
+        replay.chain(stream::empty()).boxed()
     } else {
-        history_stream.chain(live_stream).boxed()
+        replay.chain(live).boxed()
     };
     Ok(Sse::new(combined).keep_alive(axum::response::sse::KeepAlive::new()))
 }
@@ -254,16 +263,15 @@ async fn extract_metadata(
     Ok(Json(serde_json::json!({ "track": track })))
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PlaylistReq {
-    #[validate(length(max = 120))]
     name: Option<String>,
-    track_ids: Option<Vec<String>>,
 }
 
 fn normalize_playlist_name(name: Option<String>) -> String {
     let name = name.unwrap_or_else(|| "Untitled Playlist".to_string());
-    let trimmed = name.replace("  ", " ").trim().to_string();
+    let trimmed = name.split_whitespace().collect::<Vec<_>>().join(" ");
     if trimmed.is_empty() {
         "Untitled Playlist".to_string()
     } else {
@@ -273,19 +281,25 @@ fn normalize_playlist_name(name: Option<String>) -> String {
 
 async fn create_playlist(
     State(state): State<AppState>,
-    Json(payload): Json<PlaylistReq>,
+    ApiJson(payload): ApiJson<PlaylistReq>,
 ) -> Result<impl IntoResponse, AppError> {
-    payload.validate()?;
+    if payload
+        .name
+        .as_ref()
+        .is_some_and(|name| name.chars().count() > 120)
+    {
+        return Err(AppError::bad_request(
+            "Playlist name must be at most 120 characters.",
+        ));
+    }
     let name = normalize_playlist_name(payload.name);
-    let track_ids = payload.track_ids.unwrap_or_default()
-        .into_iter().take(1000).collect::<Vec<_>>(); // cap at 1000 like JS uniqueTrackIds limits
 
     let p = db::Playlist {
         id: uuid::Uuid::new_v4().to_string(),
         name,
         created_at: String::new(),
         updated_at: String::new(),
-        track_ids,
+        track_ids: Vec::new(),
     };
 
     let pool = state.pool.clone();
@@ -294,22 +308,36 @@ async fn create_playlist(
         let playlist = db::create_playlist(&mut conn, p)?;
         let playlists = db::get_all_playlists(&conn)?;
         Ok::<_, AppError>((playlist, playlists))
-    }).await??;
+    })
+    .await??;
 
-    Ok((StatusCode::CREATED, Json(serde_json::json!({
-        "playlist": playlist,
-        "playlists": playlists
-    }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "playlist": playlist,
+            "playlists": playlists
+        })),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameReq {
+    name: String,
 }
 
 async fn update_playlist(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(payload): Json<PlaylistReq>,
+    ApiJson(payload): ApiJson<RenameReq>,
 ) -> Result<impl IntoResponse, AppError> {
     let id = valid_id(&id)?;
-    payload.validate()?;
-    let name = normalize_playlist_name(payload.name);
+    if payload.name.trim().is_empty() || payload.name.chars().count() > 120 {
+        return Err(AppError::bad_request(
+            "A playlist name of 1 to 120 characters is required.",
+        ));
+    }
+    let name = normalize_playlist_name(Some(payload.name));
 
     let pool = state.pool.clone();
     let (playlist, playlists) = spawn_blocking(move || {
@@ -317,10 +345,13 @@ async fn update_playlist(
         let playlist = db::update_playlist_name(&mut conn, &id, &name)?;
         let playlists = db::get_all_playlists(&conn)?;
         Ok::<_, AppError>((playlist, playlists))
-    }).await??;
+    })
+    .await??;
 
     if let Some(playlist) = playlist {
-        Ok(Json(serde_json::json!({ "playlist": playlist, "playlists": playlists })))
+        Ok(Json(
+            serde_json::json!({ "playlist": playlist, "playlists": playlists }),
+        ))
     } else {
         Err(AppError::Http {
             status: StatusCode::NOT_FOUND,
@@ -346,7 +377,8 @@ async fn delete_playlist(
             });
         }
         db::get_all_playlists(&conn)
-    }).await??;
+    })
+    .await??;
 
     Ok(Json(serde_json::json!({ "playlists": playlists })))
 }
@@ -360,7 +392,7 @@ struct TrackReq {
 async fn add_track_to_playlist(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(payload): Json<TrackReq>,
+    ApiJson(payload): ApiJson<TrackReq>,
 ) -> Result<impl IntoResponse, AppError> {
     let id = valid_id(&id)?;
     let track_id = valid_id(&payload.track_id.unwrap_or_default())?;
@@ -378,9 +410,12 @@ async fn add_track_to_playlist(
         }
         let playlists = db::get_all_playlists(&conn)?;
         Ok::<_, AppError>((playlist, playlists))
-    }).await??;
+    })
+    .await??;
 
-    Ok(Json(serde_json::json!({ "playlist": playlist, "playlists": playlists })))
+    Ok(Json(
+        serde_json::json!({ "playlist": playlist, "playlists": playlists }),
+    ))
 }
 
 async fn remove_track_from_playlist(
@@ -403,7 +438,10 @@ async fn remove_track_from_playlist(
         }
         let playlists = db::get_all_playlists(&conn)?;
         Ok::<_, AppError>((playlist, playlists))
-    }).await??;
+    })
+    .await??;
 
-    Ok(Json(serde_json::json!({ "playlist": playlist, "playlists": playlists })))
+    Ok(Json(
+        serde_json::json!({ "playlist": playlist, "playlists": playlists }),
+    ))
 }

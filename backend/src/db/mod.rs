@@ -79,7 +79,7 @@ pub struct Playlist {
     pub track_ids: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
     pub total_tracks: i64,
@@ -92,7 +92,7 @@ pub struct Stats {
     pub genres: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Health {
     pub ok: bool,
