@@ -1,63 +1,93 @@
-use crate::config::Config;
-use crate::db::{self, Track};
-use crate::error::AppError;
-use crate::services::ffmpeg::FfmpegService;
-use anyhow::anyhow;
+use crate::{
+    config::Config,
+    db::{self, Track},
+    error::AppError,
+    services::ffmpeg::FfmpegService,
+};
+use futures_util::{stream, StreamExt};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use sha1_smol::Sha1;
-use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::fs;
-use tokio::sync::broadcast;
-use tokio::task::spawn_blocking;
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
+use tokio::{
+    fs,
+    io::AsyncReadExt,
+    sync::{broadcast, Mutex},
+    task::spawn_blocking,
+};
 use tokio_util::sync::CancellationToken;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 
 #[derive(Clone)]
 pub struct ActiveScan {
     pub job_id: String,
     pub tx: broadcast::Sender<ScanEvent>,
-    /// All events emitted so far — new SSE subscribers replay these first.
-    pub history: Arc<tokio::sync::Mutex<Vec<ScanEvent>>>,
+    pub history: Arc<Mutex<Vec<ScanEvent>>>,
     pub is_done: Arc<AtomicBool>,
-    #[allow(dead_code)]
-    pub cancel: CancellationToken,
+    cancel: CancellationToken,
 }
-
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Failure {
     pub path: String,
     pub message: String,
 }
-
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanResult {
-    pub tracks: Vec<Track>,
     pub imported: usize,
+    pub unchanged: usize,
+    pub missing: usize,
+    pub failure_count: usize,
     pub failures: Vec<Failure>,
 }
-
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "phase", rename_all = "camelCase")]
 pub enum ScanEvent {
-    Walk { found: usize },
-    Probe { done: usize, total: usize, errors: usize },
+    Walk {
+        found: usize,
+    },
+    Probe {
+        done: usize,
+        total: usize,
+        errors: usize,
+    },
     Complete(ScanResult),
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
 }
-
-fn hash_id(val: &str) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(val.as_bytes());
-    hasher.digest().to_string()[0..20].to_string()
+impl ScanEvent {
+    pub fn terminal(&self) -> bool {
+        matches!(self, Self::Complete(_) | Self::Failed { .. })
+    }
 }
-
+fn norm(path: &str) -> String {
+    if cfg!(windows) {
+        path.to_lowercase()
+    } else {
+        path.to_owned()
+    }
+}
+async fn fingerprint(path: &Path) -> Result<String, AppError> {
+    let mut file = fs::File::open(path).await?;
+    let mut hash = sha1_smol::Sha1::new();
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(hash.digest().to_string())
+}
 fn first_tag<'a>(tags: &'a HashMap<String, String>, keys: &[&str], fallback: &'a str) -> String {
     for k in keys {
         if let Some(v) = tags.get(*k) {
@@ -73,21 +103,40 @@ fn first_tag<'a>(tags: &'a HashMap<String, String>, keys: &[&str], fallback: &'a
 fn parse_number(val: Option<&String>) -> Option<i32> {
     val.and_then(|v| v.split('/').next().unwrap_or("").parse::<i32>().ok())
 }
+fn numeric(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.parse().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+}
+fn positive_integer(value: &serde_json::Value) -> Option<i32> {
+    numeric(value)
+        .filter(|value| *value > 0.0 && *value <= i32::MAX as f64 && value.fract() == 0.0)
+        .map(|value| value as i32)
+}
 
 fn parse_track(file_path: &Path, meta: std::fs::Metadata, probe: serde_json::Value) -> Track {
     let path_str = file_path.to_string_lossy().to_string();
-    let id = hash_id(&path_str.to_lowercase());
-    let file_name = file_path.file_name().map(|s| s.to_string_lossy().to_string());
+    let id = uuid::Uuid::new_v4().to_string();
+    let file_name = file_path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string());
     let directory = file_path.parent().map(|s| s.to_string_lossy().to_string());
-    
-    let title_from_file = file_path.file_stem()
-        .map(|s| s.to_string_lossy().replace(&['_', '-'][..], " ").trim().to_string())
+
+    let title_from_file = file_path
+        .file_stem()
+        .map(|s| {
+            s.to_string_lossy()
+                .replace(&['_', '-'][..], " ")
+                .trim()
+                .to_string()
+        })
         .unwrap_or_default();
 
     let mut tags = HashMap::new();
     let format_tags = probe["format"]["tags"].as_object();
     let streams = probe["streams"].as_array();
-    
+
     let audio_stream = streams.and_then(|s| s.iter().find(|st| st["codec_type"] == "audio"));
     let audio_tags = audio_stream.and_then(|s| s["tags"].as_object());
 
@@ -102,7 +151,13 @@ fn parse_track(file_path: &Path, meta: std::fs::Metadata, probe: serde_json::Val
         }
     }
 
-    let video_streams = streams.map(|s| s.iter().filter(|st| st["codec_type"] == "video").collect::<Vec<_>>()).unwrap_or_default();
+    let video_streams = streams
+        .map(|s| {
+            s.iter()
+                .filter(|st| st["codec_type"] == "video" && st["disposition"]["attached_pic"] == 1)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let has_artwork = !video_streams.is_empty();
 
     Track {
@@ -111,30 +166,43 @@ fn parse_track(file_path: &Path, meta: std::fs::Metadata, probe: serde_json::Val
         file_name,
         directory,
         title: Some(first_tag(&tags, &["title"], &title_from_file)),
-        artist: Some(first_tag(&tags, &["artist", "album_artist", "albumartist"], "Unknown Artist")),
+        artist: Some(first_tag(
+            &tags,
+            &["artist", "album_artist", "albumartist"],
+            "Unknown Artist",
+        )),
         album: Some(first_tag(&tags, &["album"], "Unknown Album")),
         album_artist: Some(first_tag(&tags, &["album_artist", "albumartist"], "")),
         genre: Some(first_tag(&tags, &["genre"], "")),
         year: Some(first_tag(&tags, &["date", "year"], "")),
         track_number: parse_number(tags.get("track").or(tags.get("tracknumber"))),
         disc_number: parse_number(tags.get("disc").or(tags.get("discnumber"))),
-        duration: probe["format"]["duration"].as_str().and_then(|s| s.parse().ok())
-            .or_else(|| audio_stream.and_then(|s| s["duration"].as_str().and_then(|s| s.parse().ok())))
+        duration: numeric(&probe["format"]["duration"])
+            .or_else(|| audio_stream.and_then(|s| numeric(&s["duration"])))
             .unwrap_or(0.0),
-        bit_rate: probe["format"]["bit_rate"].as_str().and_then(|s| s.parse().ok())
-            .or_else(|| audio_stream.and_then(|s| s["bit_rate"].as_str().and_then(|s| s.parse().ok())))
+        bit_rate: numeric(&probe["format"]["bit_rate"])
+            .or_else(|| audio_stream.and_then(|s| numeric(&s["bit_rate"])))
             .unwrap_or(0.0),
-        sample_rate: audio_stream.and_then(|s| s["sample_rate"].as_str().and_then(|s| s.parse().ok())),
-        bit_depth: parse_number(
-            audio_stream.and_then(|s| s["bits_per_raw_sample"].as_str().map(|s| s.to_string()))
-            .or_else(|| audio_stream.and_then(|s| s["bits_per_sample"].as_str().map(|s| s.to_string())))
-            .as_ref()
-        ),
-        channels: audio_stream.and_then(|s| s["channels"].as_i64()).map(|v| v as i32),
-        codec: audio_stream.and_then(|s| s["codec_name"].as_str()).map(|s| s.to_string()),
-        format: probe["format"]["format_name"].as_str().map(|s| s.to_string()),
+        sample_rate: audio_stream.and_then(|s| positive_integer(&s["sample_rate"]).map(f64::from)),
+        bit_depth: audio_stream.and_then(|s| {
+            positive_integer(&s["bits_per_raw_sample"])
+                .or_else(|| positive_integer(&s["bits_per_sample"]))
+        }),
+        channels: audio_stream
+            .and_then(|s| s["channels"].as_i64())
+            .map(|v| v as i32),
+        codec: audio_stream
+            .and_then(|s| s["codec_name"].as_str())
+            .map(|s| s.to_string()),
+        format: probe["format"]["format_name"]
+            .as_str()
+            .map(|s| s.to_string()),
         size: Some(meta.len() as i64),
-        modified_at: meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64),
+        modified_at: meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64),
         imported_at: Some(chrono::Utc::now().to_rfc3339()),
         metadata_extracted_at: Some(chrono::Utc::now().to_rfc3339()),
         has_artwork,
@@ -147,317 +215,453 @@ pub struct ScannerService {
     config: Arc<Config>,
     ffmpeg: FfmpegService,
     pool: Pool<SqliteConnectionManager>,
-    active_scan: Arc<tokio::sync::Mutex<Option<ActiveScan>>>,
+    active_scan: Arc<Mutex<Option<ActiveScan>>>,
 }
-
 impl ScannerService {
-    pub fn new(config: Arc<Config>, ffmpeg: FfmpegService, pool: Pool<SqliteConnectionManager>) -> Self {
-        Self { 
-            config, 
-            ffmpeg, 
+    pub fn new(
+        config: Arc<Config>,
+        ffmpeg: FfmpegService,
+        pool: Pool<SqliteConnectionManager>,
+    ) -> Self {
+        Self {
+            config,
+            ffmpeg,
             pool,
-            active_scan: Arc::new(tokio::sync::Mutex::new(None)),
+            active_scan: Arc::new(Mutex::new(None)),
         }
     }
-    
     pub async fn get_active_scan(&self) -> Option<ActiveScan> {
-        let lock = self.active_scan.lock().await;
-        lock.clone()
+        self.active_scan.lock().await.clone()
     }
-
-    fn is_audio_ext(path: &Path) -> bool {
-        let exts = ["aac", "aif", "aiff", "alac", "flac", "m4a", "mp3", "ogg", "opus", "wav", "wma"];
-        path.extension()
-            .and_then(OsStr::to_str)
-            .map(|e| exts.contains(&e.to_lowercase().as_str()))
-            .unwrap_or(false)
+    pub async fn cancel_active(&self) {
+        if let Some(scan) = self.get_active_scan().await {
+            scan.cancel.cancel();
+        }
     }
-
-    pub async fn start_scan(
+    pub async fn cancel_job(&self, id: &str) -> Result<(), AppError> {
+        let scan = self
+            .get_active_scan()
+            .await
+            .filter(|s| s.job_id == id)
+            .ok_or_else(|| AppError::not_found("Running scan not found."))?;
+        scan.cancel.cancel();
+        Ok(())
+    }
+    pub async fn get_scan(&self, id: &str) -> Result<ActiveScan, AppError> {
+        if let Some(scan) = self.get_active_scan().await.filter(|s| s.job_id == id) {
+            return Ok(scan);
+        }
+        let pool = self.pool.clone();
+        let job = id.to_owned();
+        let value = spawn_blocking(move || {
+            let conn = pool.get()?;
+            db::reliability::get_job(&conn, &job)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("Scan job not found."))?;
+        let event: ScanEvent = serde_json::from_value(value["event"].clone())?;
+        let (tx, _) = broadcast::channel(8);
+        Ok(ActiveScan {
+            job_id: id.into(),
+            tx,
+            history: Arc::new(Mutex::new(vec![event])),
+            is_done: Arc::new(AtomicBool::new(true)),
+            cancel: CancellationToken::new(),
+        })
+    }
+    async fn publish(
         &self,
-        directory: PathBuf,
-    ) -> Result<String, AppError> {
-        let mut lock = self.active_scan.lock().await;
-        if let Some(active) = &*lock {
-            if !active.is_done.load(Ordering::SeqCst) {
-                return Err(AppError::Http {
-                    status: axum::http::StatusCode::CONFLICT,
-                    message: "A library scan is already running.".to_string(),
-                    detail: None,
-                });
+        scan: &ActiveScan,
+        directory: &str,
+        event: ScanEvent,
+    ) -> Result<(), AppError> {
+        {
+            let mut history = scan.history.lock().await;
+            if let Some(last) = history
+                .last_mut()
+                .filter(|last| std::mem::discriminant(*last) == std::mem::discriminant(&event))
+            {
+                *last = event.clone();
+            } else {
+                history.push(event.clone());
             }
         }
-
-        let job_id = uuid::Uuid::new_v4().to_string();
-        let (tx, _rx_keep_alive) = broadcast::channel(512);
-        let cancel = CancellationToken::new();
-        let history: Arc<tokio::sync::Mutex<Vec<ScanEvent>>> = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let is_done = Arc::new(AtomicBool::new(false));
-
-        let active_scan = ActiveScan {
-            job_id: job_id.clone(),
-            tx: tx.clone(),
-            history: history.clone(),
-            is_done: is_done.clone(),
-            cancel: cancel.clone(),
-        };
-        *lock = Some(active_scan);
-
-        let scanner = self.clone();
-        tokio::spawn(async move {
-            // _rx_keep_alive keeps the broadcast channel open for the duration of the scan
-            let _rx_keep_alive = _rx_keep_alive;
-            if let Err(error) = scanner.scan_directory_impl(directory, tx.clone(), history.clone(), cancel).await {
-                let event = ScanEvent::Failed {
-                    message: format!("Scan failed: {error}"),
-                };
-                history.lock().await.push(event.clone());
-                let _ = tx.send(event);
-            }
-
-            // Mark the scan as fully done so a new one can overwrite it
-            is_done.store(true, Ordering::SeqCst);
-        });
-
-        Ok(job_id)
+        let terminal = event.terminal();
+        if terminal || matches!(event, ScanEvent::Walk { .. }) {
+            let pool = self.pool.clone();
+            let id = scan.job_id.clone();
+            let directory = directory.to_owned();
+            let value = serde_json::to_value(&event)?;
+            spawn_blocking(move || {
+                let conn = pool.get()?;
+                db::reliability::save_job(&conn, &id, &directory, &value, terminal)
+            })
+            .await??;
+        }
+        let _ = scan.tx.send(event);
+        Ok(())
     }
-
-    async fn scan_directory_impl(
-        &self,
-        directory: PathBuf,
-        tx: broadcast::Sender<ScanEvent>,
-        history: Arc<tokio::sync::Mutex<Vec<ScanEvent>>>,
-        cancel: CancellationToken,
-    ) -> Result<ScanResult, AppError> {
-        let resolved = fs::canonicalize(&directory).await.map_err(|e| AppError::Http {
-            status: axum::http::StatusCode::BAD_REQUEST,
-            message: "Music folder could not be opened.".to_string(),
-            detail: Some(e.to_string()),
-        })?;
-
-        let meta = fs::metadata(&resolved).await?;
-        if !meta.is_dir() {
+    fn is_audio_ext(path: &Path) -> bool {
+        path.extension().and_then(OsStr::to_str).is_some_and(|e| {
+            [
+                "aac", "aif", "aiff", "alac", "flac", "m4a", "mp3", "ogg", "opus", "wav", "wma",
+            ]
+            .contains(&e.to_lowercase().as_str())
+        })
+    }
+    pub async fn start_scan(&self, directory: PathBuf) -> Result<String, AppError> {
+        let resolved = fs::canonicalize(&directory)
+            .await
+            .map_err(|_| AppError::bad_request("Music folder could not be opened."))?;
+        if !fs::metadata(&resolved).await?.is_dir() {
+            return Err(AppError::bad_request("Path is not a directory."));
+        }
+        let mut active = self.active_scan.lock().await;
+        if active
+            .as_ref()
+            .is_some_and(|s| !s.is_done.load(Ordering::SeqCst))
+        {
             return Err(AppError::Http {
-                status: axum::http::StatusCode::BAD_REQUEST,
-                message: "Path is not a directory.".to_string(),
+                status: axum::http::StatusCode::CONFLICT,
+                message: "A library scan is already running.".into(),
                 detail: None,
             });
         }
-
+        let job = uuid::Uuid::new_v4().to_string();
+        let (tx, _) = broadcast::channel(512);
+        let scan = ActiveScan {
+            job_id: job.clone(),
+            tx,
+            history: Arc::new(Mutex::new(Vec::new())),
+            is_done: Arc::new(AtomicBool::new(false)),
+            cancel: CancellationToken::new(),
+        };
+        self.publish(
+            &scan,
+            &resolved.to_string_lossy(),
+            ScanEvent::Walk { found: 0 },
+        )
+        .await?;
+        *active = Some(scan.clone());
+        drop(active);
+        let scanner = self.clone();
+        tokio::spawn(async move {
+            let path = resolved.to_string_lossy().to_string();
+            let result = tokio::select! {
+                result=scanner.scan(&scan,resolved)=>result,
+                _=scan.cancel.cancelled()=>Err(AppError::bad_request("Scan canceled. Completed imports were kept; rescan to continue.")),
+            };
+            let terminal = match result {
+                Ok(result) => ScanEvent::Complete(result),
+                Err(error) => ScanEvent::Failed {
+                    message: error.to_string(),
+                },
+            };
+            if let Err(error) = scanner.publish(&scan, &path, terminal.clone()).await {
+                tracing::error!(%error,"Could not save scan result");
+                let _ = scan.tx.send(terminal);
+            }
+            scan.is_done.store(true, Ordering::SeqCst);
+        });
+        Ok(job)
+    }
+    async fn scan(&self, scan: &ActiveScan, resolved: PathBuf) -> Result<ScanResult, AppError> {
+        let source_path = resolved.to_string_lossy().to_string();
+        let pool = self.pool.clone();
+        let source_path2 = source_path.clone();
+        let (source, inventory) = spawn_blocking(move || {
+            let mut conn = pool.get()?;
+            db::remember_library_source(&mut conn, &source_path2)?;
+            let source: String = conn.query_row(
+                "SELECT id FROM library_sources WHERE path=?",
+                [source_path2],
+                |r| r.get(0),
+            )?;
+            Ok::<_, AppError>((source, db::reliability::scan_inventory(&conn)?))
+        })
+        .await??;
+        let mut known = HashMap::new();
+        let mut missing_fingerprints: HashMap<String, Vec<Track>> = HashMap::new();
+        for (track, hash) in inventory {
+            if fs::metadata(&track.path).await.is_err() {
+                if let Some(hash) = &hash {
+                    missing_fingerprints
+                        .entry(hash.clone())
+                        .or_default()
+                        .push(track.clone());
+                }
+            }
+            known.insert(norm(&track.path), (track, hash));
+        }
+        let known = Arc::new(known);
+        let missing_fingerprints = Arc::new(missing_fingerprints);
+        let mut dirs = vec![resolved];
+        let mut visited = HashSet::new();
         let mut files = Vec::new();
         let mut failures = Vec::new();
-        let mut visited = HashSet::new();
-
-        let mut dirs_to_visit = vec![resolved];
-
-        while let Some(current) = dirs_to_visit.pop() {
-            if cancel.is_cancelled() { break; }
-            if files.len() >= self.config.max_scan_files.get() {
-                failures.push(Failure {
-                    path: current.to_string_lossy().to_string(),
-                    message: format!("Scan stopped after {} audio files.", self.config.max_scan_files),
-                });
-                break;
+        let mut failure_count = 0;
+        let mut complete_walk = true;
+        let mut report = |path: String, message: String| {
+            failure_count += 1;
+            if failures.len() < self.config.max_scan_failures.get() {
+                failures.push(Failure { path, message });
             }
-
-            let real_path = match fs::canonicalize(&current).await {
+        };
+        'walk: while let Some(path) = dirs.pop() {
+            let real = match fs::canonicalize(&path).await {
                 Ok(p) => p,
                 Err(e) => {
-                    failures.push(Failure { path: current.to_string_lossy().to_string(), message: e.to_string() });
+                    complete_walk = false;
+                    report(path.to_string_lossy().into(), e.to_string());
                     continue;
                 }
             };
-            
-            let norm = if cfg!(windows) {
-                real_path.to_string_lossy().to_lowercase()
-            } else {
-                real_path.to_string_lossy().to_string()
-            };
-
-            if !visited.insert(norm) { continue; }
-
-            let mut dir = match fs::read_dir(&real_path).await {
+            if !visited.insert(norm(&real.to_string_lossy())) {
+                continue;
+            }
+            let mut entries = match fs::read_dir(&real).await {
                 Ok(d) => d,
                 Err(e) => {
-                    failures.push(Failure { path: real_path.to_string_lossy().to_string(), message: e.to_string() });
+                    complete_walk = false;
+                    report(real.to_string_lossy().into(), e.to_string());
                     continue;
                 }
             };
-
-            while let Some(entry) = dir.next_entry().await.ok().flatten() {
-                let typ = match entry.file_type().await {
-                    Ok(t) => t,
-                    Err(_) => continue,
+            loop {
+                let entry = match entries.next_entry().await {
+                    Ok(Some(e)) => e,
+                    Ok(None) => break,
+                    Err(e) => {
+                        complete_walk = false;
+                        report(real.to_string_lossy().into(), e.to_string());
+                        break;
+                    }
                 };
-                if typ.is_symlink() { continue; }
-
-                let p = entry.path();
-                if typ.is_dir() {
-                    dirs_to_visit.push(p);
-                } else if typ.is_file() && Self::is_audio_ext(&p) {
-                    files.push(p);
+                let kind = match entry.file_type().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        complete_walk = false;
+                        report(entry.path().to_string_lossy().into(), e.to_string());
+                        continue;
+                    }
+                };
+                if kind.is_symlink() {
+                    continue;
+                }
+                if kind.is_dir() {
+                    dirs.push(entry.path());
+                } else if kind.is_file() && Self::is_audio_ext(&entry.path()) {
+                    if files.len() >= self.config.max_scan_files.get() {
+                        complete_walk = false;
+                        report(
+                            real.to_string_lossy().into(),
+                            format!(
+                                "Scan limit of {} files reached.",
+                                self.config.max_scan_files
+                            ),
+                        );
+                        break 'walk;
+                    }
+                    files.push(entry.path());
                 }
             }
-
-            // Always send a Walk event after processing each directory
-            let event = ScanEvent::Walk { found: files.len() };
-            history.lock().await.push(event.clone());
-            let _ = tx.send(event);
+            self.publish(scan, &source_path, ScanEvent::Walk { found: files.len() })
+                .await?;
         }
-
-        // Send a final Walk event with the definitive file count
-        {
-            let event = ScanEvent::Walk { found: files.len() };
-            history.lock().await.push(event.clone());
-            let _ = tx.send(event);
-        }
-
         let total = files.len();
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.scan_concurrency.get()));
-        let (tx_track, mut rx_track) = tokio::sync::mpsc::channel(100);
-
-        let ffmpeg_service = self.ffmpeg.clone();
-        tokio::spawn(async move {
-            for file in files {
-                if cancel.is_cancelled() { break; }
-                let permit = match semaphore.clone().acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => break,
-                };
-                let ffmpeg = ffmpeg_service.clone();
-                let tx: tokio::sync::mpsc::Sender<Result<Track, anyhow::Error>> = tx_track.clone();
-
-                tokio::spawn(async move {
-                    let _p = permit;
-                    let meta = fs::metadata(&file).await.map_err(|e| anyhow!("Stat failed: {}", e));
-                    let meta = match meta {
-                        Ok(m) => m,
-                        Err(e) => { let _ = tx.send(Err(e)).await; return; }
-                    };
-                    let probe = ffmpeg.probe_track_metadata(&file).await.map_err(|e| anyhow!("Probe failed: {:?}", e));
-                    let probe = match probe {
-                        Ok(p) => p,
-                        Err(e) => { let _ = tx.send(Err(anyhow!("{:?}", e))).await; return; }
-                    };
-                    let track = parse_track(&file, meta, probe);
-                    let _ = tx.send(Ok(track)).await;
-                });
-            }
-            drop(tx_track); // close sending end so rx_track drains naturally
-        });
-
+        let ffmpeg = self.ffmpeg.clone();
+        let mut probes = stream::iter(files)
+            .map(|path| {
+                let known = known.clone();
+                let missing = missing_fingerprints.clone();
+                let ffmpeg = ffmpeg.clone();
+                async move {
+                    let result = async {
+                        if path.to_str().is_none() {
+                            return Err(AppError::bad_request(
+                                "This filename is not valid Unicode. Rename it before importing.",
+                            ));
+                        }
+                        let meta = fs::metadata(&path).await?;
+                        let modified = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|t| t.as_millis() as i64);
+                        let old = known.get(&norm(&path.to_string_lossy()));
+                        if let Some((track, Some(hash))) = old {
+                            if track.size == Some(meta.len() as i64)
+                                && track.modified_at == modified
+                            {
+                                return Ok::<_, AppError>((track.clone(), hash.clone(), true));
+                            }
+                        }
+                        let hash = fingerprint(&path).await?;
+                        let probe = ffmpeg.probe_track_metadata(&path).await?;
+                        let mut track = parse_track(&path, meta, probe);
+                        if let Some((old, _)) = old {
+                            track.id = old.id.clone();
+                            track.imported_at = old.imported_at.clone();
+                        } else if let Some(candidates) = missing.get(&hash).filter(|v| v.len() == 1)
+                        {
+                            track.id = candidates[0].id.clone();
+                            track.imported_at = candidates[0].imported_at.clone();
+                        }
+                        Ok((track, hash, false))
+                    }
+                    .await;
+                    (path, result)
+                }
+            })
+            .buffer_unordered(self.config.scan_concurrency.get());
+        let mut batch = Vec::new();
+        let mut imported = 0;
+        let mut unchanged = 0;
         let mut done = 0;
         let mut errors = 0;
-        let mut tracks_to_insert = Vec::new();
-        let mut imported = 0;
-        
-        while let Some(res) = rx_track.recv().await {
+        let mut moved_ids = HashSet::new();
+        while let Some((path, result)) = probes.next().await {
             done += 1;
-            match res {
-                Ok(track) => tracks_to_insert.push(track),
+            match result {
+                Ok((mut track, hash, skip)) => {
+                    // Two new copies of one missing file must not share an ID.
+                    if !known.contains_key(&norm(&track.path))
+                        && !moved_ids.insert(track.id.clone())
+                    {
+                        track.id = uuid::Uuid::new_v4().to_string();
+                    }
+                    if skip {
+                        unchanged += 1;
+                    } else {
+                        imported += 1;
+                    }
+                    batch.push((track, hash));
+                }
                 Err(e) => {
                     errors += 1;
+                    failure_count += 1;
                     if failures.len() < self.config.max_scan_failures.get() {
-                        failures.push(Failure { path: "[probe]".into(), message: e.to_string() });
+                        failures.push(Failure {
+                            path: path.to_string_lossy().into(),
+                            message: e.to_string(),
+                        });
                     }
                 }
             }
-
-            if tracks_to_insert.len() >= 100 {
-                let batch = std::mem::take(&mut tracks_to_insert);
-                let batch_len = batch.len();
-                let pool = self.pool.clone();
-                let write_result = spawn_blocking(move || -> Result<(), AppError> {
-                    let mut conn = pool.get()?;
-                    db::upsert_tracks_batch(&mut conn, &batch)
-                }).await?;
-                match write_result {
-                    Ok(()) => imported += batch_len,
-                    Err(error) => {
-                        errors += batch_len;
-                        if failures.len() < self.config.max_scan_failures.get() {
-                            failures.push(Failure { path: "[database]".into(), message: error.to_string() });
-                        }
-                    }
-                }
+            if batch.len() >= 100 {
+                self.save_batch(
+                    std::mem::take(&mut batch),
+                    source.clone(),
+                    scan.job_id.clone(),
+                )
+                .await?;
             }
-            
-            let event = ScanEvent::Probe { done, total, errors };
-            history.lock().await.push(event.clone());
-            let _ = tx.send(event);
+            self.publish(
+                scan,
+                &source_path,
+                ScanEvent::Probe {
+                    done,
+                    total,
+                    errors,
+                },
+            )
+            .await?;
         }
-
-        // Insert remainder
-        if !tracks_to_insert.is_empty() {
-            let pool = self.pool.clone();
-            let batch = std::mem::take(&mut tracks_to_insert);
-            let batch_len = batch.len();
-            let write_result = spawn_blocking(move || -> Result<(), AppError> {
-                let mut conn = pool.get()?;
-                db::upsert_tracks_batch(&mut conn, &batch)
-            }).await?;
-            match write_result {
-                Ok(()) => imported += batch_len,
-                Err(error) => {
-                    if failures.len() < self.config.max_scan_failures.get() {
-                        failures.push(Failure { path: "[database]".into(), message: error.to_string() });
-                    }
-                }
-            }
+        if !batch.is_empty() {
+            self.save_batch(batch, source.clone(), scan.job_id.clone())
+                .await?;
         }
-        
+        // Probe failures can indicate inaccessible files. Never mark them missing.
         let pool = self.pool.clone();
-        let all_tracks = spawn_blocking(move || {
-            let conn = pool.get()?;
-            db::get_all_tracks(&conn)
-        }).await??;
-
-        let result = ScanResult {
-            tracks: all_tracks,
+        let job = scan.job_id.clone();
+        let missing = spawn_blocking(move || {
+            let mut conn = pool.get()?;
+            db::reliability::finish_source(&mut conn, &source, &job, complete_walk && errors == 0)
+        })
+        .await??;
+        metrics::counter!("scanner_imported_total").increment(imported as u64);
+        metrics::counter!("scanner_failures_total").increment(failure_count as u64);
+        Ok(ScanResult {
             imported,
+            unchanged,
+            missing,
+            failure_count,
             failures,
-        };
-        
-        metrics::counter!("scanner_imported_total").increment(result.imported as u64);
-        metrics::counter!("scanner_failures_total").increment(result.failures.len() as u64);
-
-        let event = ScanEvent::Complete(result.clone());
-        history.lock().await.push(event.clone());
-        let _ = tx.send(event);
-
-        Ok(result)
+        })
     }
-
-    pub async fn extract_single_track_metadata(&self, track_id: &str) -> Result<Track, AppError> {
+    async fn save_batch(
+        &self,
+        batch: Vec<(Track, String)>,
+        source: String,
+        job: String,
+    ) -> Result<(), AppError> {
         let pool = self.pool.clone();
-        let id_cloned = track_id.to_string();
-        let track = spawn_blocking(move || {
-            let conn = pool.get()?;
-            db::get_track_by_id(&conn, &id_cloned)
-        }).await??.ok_or_else(|| AppError::Http {
-            status: axum::http::StatusCode::NOT_FOUND,
-            message: "Track not found.".to_string(),
-            detail: None,
-        })?;
-
-        let path = PathBuf::from(&track.path);
-        let meta = fs::metadata(&path).await.map_err(|e| AppError::Http {
-            status: axum::http::StatusCode::NOT_FOUND,
-            message: "Track file could not be opened.".to_string(),
-            detail: Some(e.to_string()),
-        })?;
-
-        let probe = self.ffmpeg.probe_track_metadata(&path).await?;
-        let mut next_track = parse_track(&path, meta, probe);
-        next_track.id = track.id; // preserve ID
-        
-        let pool = self.pool.clone();
-        let t_clone = next_track.clone();
         spawn_blocking(move || {
             let mut conn = pool.get()?;
-            db::upsert_tracks_batch(&mut conn, &[t_clone])
+            db::reliability::save_scan_batch(&mut conn, &batch, &source, &job)
+        })
+        .await??;
+        Ok(())
+    }
+    pub async fn extract_single_track_metadata(&self, id: &str) -> Result<Track, AppError> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        let track = spawn_blocking(move || {
+            let conn = pool.get()?;
+            db::get_track_by_id(&conn, &id)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("Track not found."))?;
+        let path = PathBuf::from(&track.path);
+        let mut next = parse_track(
+            &path,
+            fs::metadata(&path).await?,
+            self.ffmpeg.probe_track_metadata(&path).await?,
+        );
+        next.id = track.id;
+        next.imported_at = track.imported_at;
+        let hash = fingerprint(&path).await?;
+        let pool = self.pool.clone();
+        let saved = next.clone();
+        spawn_blocking(move || {
+            let mut conn=pool.get()?;let tx=conn.transaction()?;
+            db::upsert_tracks(&tx,std::slice::from_ref(&saved))?;
+            tx.execute("INSERT INTO track_fingerprints VALUES (?,?) ON CONFLICT(trackId) DO UPDATE SET fingerprint=excluded.fingerprint",rusqlite::params![saved.id,hash])?;
+            tx.execute("UPDATE tracks SET available=1 WHERE id=?",[saved.id])?;tx.commit()?;Ok::<_,AppError>(())
         }).await??;
+        Ok(next)
+    }
+}
 
-        Ok(next_track)
+#[cfg(test)]
+mod metadata_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    #[test]
+    fn numeric_metadata_and_attached_picture_are_parsed_deliberately() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let probe = serde_json::json!({
+            "format":{"duration":12.5,"bit_rate":"96000","tags":{"ALBUM":"Collection","ALBUMARTIST":"Various Artists","TRACK":"2/12","DISC":"1/2"}},
+            "streams":[{"codec_type":"audio","codec_name":"pcm_s16le","sample_rate":48000,"channels":2,"bits_per_raw_sample":"0","bits_per_sample":16},
+            {"codec_type":"video","disposition":{"attached_pic":0}}]
+        });
+        let track = parse_track(
+            file.path(),
+            file.as_file().metadata().unwrap(),
+            probe.clone(),
+        );
+        assert_eq!(track.duration, 12.5);
+        assert_eq!(track.bit_rate, 96000.0);
+        assert_eq!(track.sample_rate, Some(48000.0));
+        assert_eq!(track.bit_depth, Some(16));
+        assert_eq!(track.track_number, Some(2));
+        assert_eq!(track.disc_number, Some(1));
+        assert_eq!(track.album_artist.as_deref(), Some("Various Artists"));
+        assert!(!track.has_artwork);
+        let mut picture = probe;
+        picture["streams"][1]["disposition"]["attached_pic"] = serde_json::json!(1);
+        assert!(parse_track(file.path(), file.as_file().metadata().unwrap(), picture).has_artwork);
+        assert!(numeric(&serde_json::json!("NaN")).is_none());
+        assert!(positive_integer(&serde_json::json!(1.5)).is_none());
     }
 }

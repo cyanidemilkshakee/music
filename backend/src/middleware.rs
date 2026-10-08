@@ -87,9 +87,7 @@ pub async fn security_headers_middleware(req: Request, next: Next) -> Response {
 
 pub async fn compression_bypass_middleware(mut req: Request, next: Next) -> Response {
     let path = req.uri().path();
-    let bypass = path.starts_with("/api/stream/")
-        || path.starts_with("/api/audio/")
-        || path.starts_with("/api/artwork/");
+    let bypass = path.starts_with("/api/audio/") || path.starts_with("/api/artwork/");
     let bypass = bypass || path.starts_with("/api/original/") || path.ends_with("/stream");
 
     if bypass {
