@@ -46,35 +46,35 @@ async fn delete_source(
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 
-async fn pick_folder() -> Result<Json<serde_json::Value>, AppError> {
+async fn pick_folder(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
     #[cfg(target_os = "windows")]
     {
-        let output = tokio::process::Command::new("powershell.exe")
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command
             .args([
                 "-NoProfile",
                 "-STA",
                 "-Command",
-                "Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = 'Choose a music folder'; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.SelectedPath) }",
+                "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = 'Choose a music folder'; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.SelectedPath) }",
             ])
-            .output()
+            .kill_on_drop(true);
+        let output = state
+            .ffmpeg
+            .run(&mut command, "Folder picker", 120_000)
             .await?;
-        if !output.status.success() {
-            return Err(AppError::Http {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                message: "The folder picker could not be opened.".to_string(),
-                detail: None,
-            });
-        }
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let path = String::from_utf8_lossy(&output).trim().to_string();
         Ok(Json(
             serde_json::json!({ "directory": (!path.is_empty()).then_some(path) }),
         ))
     }
 
     #[cfg(not(target_os = "windows"))]
-    Err(AppError::Http {
-        status: StatusCode::NOT_IMPLEMENTED,
-        message: "The native folder picker is available on Windows only.".to_string(),
-        detail: None,
-    })
+    {
+        let _ = state;
+        Err(AppError::Http {
+            status: StatusCode::NOT_IMPLEMENTED,
+            message: "The native folder picker is available on Windows only.".to_string(),
+            detail: None,
+        })
+    }
 }
