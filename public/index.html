@@ -3,28 +3,28 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Apple Music - Local</title>
-    <meta name="description" content="High-fidelity local music player with an Apple Music macOS interface.">
-    <link rel="stylesheet" href="/styles.css?v=20260915-light">
+    <title>Local Amp</title>
+    <meta name="description" content="A private local music library with original-quality playback, playlists, and a visualizer.">
+    <link rel="stylesheet" href="/styles.css">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>">
   </head>
   <body>
     <div class="import-sheet is-hidden" id="importSheet">
-      <div class="import-sheet-inner">
-        <h3>Add to Library</h3>
+      <div class="import-sheet-inner" role="dialog" aria-modal="true" aria-labelledby="importSheetTitle">
+        <h3 id="importSheetTitle">Add to Library</h3>
         <p class="sheet-copy">Choose a folder on this computer, select a saved source, or enter an absolute path.</p>
         <div class="import-row">
-          <input id="folderInputSheet" class="import-input" type="text" spellcheck="false" placeholder="C:\Music">
+          <input id="folderInputSheet" class="import-input" type="text" spellcheck="false" placeholder="C:\Music" aria-label="Absolute music folder path">
           <button id="pickFolderButton" class="import-btn import-btn-secondary" type="button">Choose Folder</button>
           <button id="importButtonSheet" class="import-btn" type="button">Import</button>
         </div>
-        <div id="importDropZone" class="import-drop-zone" tabindex="0">Or drop a music folder here from File Explorer</div>
+        <div id="importDropZone" class="import-drop-zone">File URL drops are supported when the browser supplies a path. Otherwise choose a folder above.</div>
         <div class="library-source-wrap">
           <p class="source-label">Saved folders</p>
           <div id="librarySourceList" class="library-source-list" aria-live="polite"></div>
         </div>
-        <div id="importStatusSheet" class="import-status"></div>
-        <button class="sheet-close-btn" id="importSheetClose" type="button">Cancel</button>
+        <div id="importStatusSheet" class="import-status" role="status" aria-live="polite"></div><div id="scanFailures" class="scan-failures"></div><button id="cancelScanButton" class="glass-btn danger" type="button" hidden>Cancel scan</button>
+        <button class="sheet-close-btn" id="importSheetClose" type="button">Close</button>
       </div>
     </div>
 
@@ -34,12 +34,12 @@
           <div class="sidebar-main">
             <div class="search-box">
               <span data-icon="search" class="search-icon"></span>
-              <input id="searchInput" type="search" placeholder="Search" autocomplete="off">
+              <input id="searchInput" type="search" maxlength="256" aria-label="Search music" placeholder="Search" autocomplete="off">
             </div>
 
             <ul class="nav-list main-nav">
               <li>
-                <button class="nav-item is-active" data-view="home" type="button">
+                <button class="nav-item is-active" data-view="home" aria-label="Home" type="button">
                   <span data-icon="home" class="nav-icon"></span>
                   <span class="nav-label" data-mobile-label="Home">Home</span>
                 </button>
@@ -50,25 +50,25 @@
               <h3 class="section-title">Library</h3>
               <ul class="nav-list">
                 <li>
-                <button class="nav-item" data-view="recent" type="button">
+                <button class="nav-item" data-view="recent" aria-label="Recently Added" type="button">
                   <span data-icon="time" class="nav-icon"></span>
                   <span class="nav-label" data-mobile-label="Recent">Recently Added</span>
                   </button>
                 </li>
                 <li>
-                <button class="nav-item" data-view="artists" type="button">
+                <button class="nav-item" data-view="artists" aria-label="Artists" type="button">
                   <span data-icon="mic" class="nav-icon"></span>
                   <span class="nav-label" data-mobile-label="Artists">Artists</span>
                   </button>
                 </li>
                 <li>
-                <button class="nav-item" data-view="albums" type="button">
+                <button class="nav-item" data-view="albums" aria-label="Albums" type="button">
                   <span data-icon="album" class="nav-icon"></span>
                   <span class="nav-label" data-mobile-label="Albums">Albums</span>
                   </button>
                 </li>
                 <li>
-                <button class="nav-item" data-view="songs" type="button">
+                <button class="nav-item" data-view="songs" aria-label="Songs" type="button">
                   <span data-icon="note" class="nav-icon"></span>
                   <span class="nav-label" data-mobile-label="Songs">Songs</span>
                   </button>
@@ -83,7 +83,7 @@
               </div>
               <ul class="nav-list playlist-nav">
                 <li>
-                <button class="nav-item" data-view="playlists" type="button">
+                <button class="nav-item" data-view="playlists" aria-label="All Playlists" type="button">
                   <span data-icon="playlist" class="nav-icon"></span>
                   <span class="nav-label" data-mobile-label="Playlists">All Playlists</span>
                   </button>
@@ -96,13 +96,15 @@
           </div>
 
           <div class="sidebar-bottom-actions">
-            <button id="clearCacheButton" class="sidebar-clear-cache" type="button">Clear Cache</button>
+            <button id="settingsButton" class="sidebar-add-folder" type="button">Library & Playback...</button><button id="clearCacheButton" class="sidebar-clear-cache" type="button">Clear Cache</button>
             <button id="sidebarImportButton" class="sidebar-add-folder" type="button">Add Folder...</button>
           </div>
         </div>
       </nav>
 
       <main class="main-view" id="mainView">
+        <div class="mobile-tools"><button id="mobileImportButton" type="button">Add Folder</button><button id="mobilePlaylistButton" type="button">New Playlist</button><button id="mobileSettingsButton" type="button">Settings</button></div>
+        <div id="appStatus" class="app-status" role="status" aria-live="polite"><span>Loading library…</span><button id="retryLoadButton" type="button" hidden>Retry</button></div>
         <section class="empty-state-panel" id="importPanel">
           <div class="empty-inner">
             <span data-icon="library-large" class="empty-icon"></span>
@@ -115,7 +117,7 @@
         <div class="content-scroll is-hidden" id="contentScroll">
           <div class="section-header">
             <div class="section-heading">
-              <button class="chevron" id="backButton" title="Back" type="button"><span data-icon="chevron-left"></span></button>
+              <button class="chevron" id="backButton" title="Back" type="button" aria-label="Back"><span data-icon="chevron-left"></span></button>
               <h1 class="page-title" id="viewTitle">Library</h1>
             </div>
             <div class="section-actions">
@@ -146,6 +148,7 @@
           <div class="grid-container" id="trackGrid"></div>
         </div>
 
+        <div id="playbackStatus" class="playback-status" role="status" aria-live="polite" hidden><span></span><button id="retryPlaybackButton" type="button" hidden>Retry playback</button></div>
         <div class="player-pill" id="playerPill">
           <div class="pill-left">
             <div class="np-art">
@@ -154,6 +157,7 @@
             <div class="np-info-col">
               <div class="np-title" id="trackTitle">Not Playing</div>
               <div class="np-artist" id="trackArtist">Local Amp</div>
+              <small id="playbackQuality"></small>
             </div>
           </div>
 
@@ -169,36 +173,32 @@
             </div>
             <div class="transport-wrap">
               <div class="transport-controls">
-                <button class="icon-btn" id="shuffleButton" title="Shuffle" type="button"><span data-icon="shuffle"></span></button>
-                <button class="icon-btn" id="prevButton" title="Previous" type="button"><span data-icon="skip-back"></span></button>
+                <button class="icon-btn" id="shuffleButton" title="Shuffle" type="button" aria-label="Shuffle"><span data-icon="shuffle"></span></button>
+                <button class="icon-btn" id="prevButton" title="Previous" type="button" aria-label="Previous track"><span data-icon="skip-back"></span></button>
                 <button class="icon-btn play-btn" id="playButton" title="Play" type="button"><span data-icon="play-solid"></span></button>
-                <button class="icon-btn" id="nextButton" title="Next" type="button"><span data-icon="skip-forward"></span></button>
-                <button class="icon-btn" id="repeatButton" title="Repeat" type="button"><span data-icon="repeat"></span></button>
+                <button class="icon-btn" id="nextButton" title="Next" type="button" aria-label="Next track"><span data-icon="skip-forward"></span></button>
+                <button class="icon-btn" id="repeatButton" title="Repeat" type="button" aria-label="Repeat"><span data-icon="repeat"></span></button>
               </div>
             </div>
           </div>
 
           <div class="pill-right">
             <div class="player-actions">
-              <button class="icon-btn" id="fsExpandBtn" title="Full Screen Visualizer" type="button"><span data-icon="maximize"></span></button>
-              <button class="icon-btn" id="queueButton" title="Queue" type="button"><span data-icon="queue"></span></button>
+              <button class="icon-btn" id="fsExpandBtn" title="Full Screen Visualizer" type="button" aria-label="Open visualizer"><span data-icon="maximize"></span></button>
+              <button class="icon-btn" id="queueButton" title="Queue" type="button" aria-label="Queue"><span data-icon="queue"></span></button>
             </div>
             <div class="volume-container">
-              <button class="icon-btn" id="muteBtn" type="button"><span data-icon="volume-high"></span></button>
-              <div class="vol-slider-wrap" id="volScrubberBg">
-                <div class="scrubber-bg">
-                  <div class="scrubber-progress vol-progress" id="volProgress"></div>
-                </div>
-              </div>
+              <button class="icon-btn" id="muteBtn" type="button" aria-label="Mute"><span data-icon="volume-high"></span></button>
+              <input id="volumeRange" type="range" min="0" max="1" value="1" step="0.01" aria-label="Volume">
             </div>
           </div>
         </div>
 
-        <div id="fullScreenPlayer" class="fs-player is-hidden" aria-hidden="true">
+        <div id="fullScreenPlayer" class="fs-player is-hidden" role="dialog" aria-modal="true" aria-label="Full screen player" aria-hidden="true">
           <canvas id="bg-canvas" class="fs-canvas"></canvas>
           <div class="fs-ui">
             <div class="fs-header">
-              <button class="icon-btn fs-close-btn" id="fsCloseBtn" title="Close Full Screen" type="button"><span data-icon="chevron-down"></span></button>
+              <button class="icon-btn fs-close-btn" id="fsCloseBtn" title="Close Full Screen" type="button" aria-label="Close full screen"><span data-icon="chevron-down"></span></button>
             </div>
             <div class="fs-content">
               <!-- The canvas renders the audio-reactive vinyl behind this. -->
@@ -214,11 +214,11 @@
                 <span class="fs-time-label" id="fsTimeRemaining">-0:00</span>
               </div>
               <div class="fs-transport">
-                <button class="icon-btn" id="fsShuffleButton" type="button"><span data-icon="shuffle"></span></button>
-                <button class="icon-btn" id="fsPrevButton" type="button"><span data-icon="skip-back"></span></button>
+                <button class="icon-btn" id="fsShuffleButton" type="button" aria-label="Shuffle"><span data-icon="shuffle"></span></button>
+                <button class="icon-btn" id="fsPrevButton" type="button" aria-label="Previous track"><span data-icon="skip-back"></span></button>
                 <button class="icon-btn fs-play-btn" id="fsPlayButton" type="button"><span data-icon="play-solid"></span></button>
-                <button class="icon-btn" id="fsNextButton" type="button"><span data-icon="skip-forward"></span></button>
-                <button class="icon-btn" id="fsRepeatButton" type="button"><span data-icon="repeat"></span></button>
+                <button class="icon-btn" id="fsNextButton" type="button" aria-label="Next track"><span data-icon="skip-forward"></span></button>
+                <button class="icon-btn" id="fsRepeatButton" type="button" aria-label="Repeat"><span data-icon="repeat"></span></button>
               </div>
             </div>
           </div>
@@ -232,7 +232,7 @@
             </div>
             <div class="queue-actions">
               <button class="queue-clear" id="queueClearButton" type="button">Clear</button>
-              <button class="icon-btn" id="queueCloseButton" title="Close" type="button"><span data-icon="x"></span></button>
+              <button class="icon-btn" id="queueCloseButton" title="Close" type="button" aria-label="Close queue"><span data-icon="x"></span></button>
             </div>
           </div>
           <div class="queue-list" id="queueList"></div>
@@ -261,6 +261,6 @@
     </div>
 
     <audio id="audio"></audio>
-    <script type="module" src="/app.js?v=20260915-light"></script>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>
