@@ -1,6 +1,5 @@
 // ── State Accessor Helpers ───────────────────────────────────────────────────
 import { state } from "./state.js";
-import { groupTracks } from "./groups.js";
 
 /** The track the user has selected (highlighted) */
 export function selectedTrack() {
@@ -19,20 +18,23 @@ export function activePlaylist() {
 
 /** The active group object (album/artist drill-down) */
 export function activeGroup() {
-  if (!state.activeGroup) return null;
-  return groupTracks(state.activeGroup.type)
-    .find(g => g.key === state.activeGroup.key) || null;
+  return state.activeGroup;
 }
 
 /** Ordered tracks belonging to a playlist, resolved against the library */
-export function playlistTracks(playlist) {
-  const byId = new Map(state.tracks.map(t => [t.id, t]));
+function playlistTracks(playlist) {
+  const byId = trackIndex();
   return (playlist?.trackIds || []).map(id => byId.get(id)).filter(Boolean);
+}
+let indexedTracks, index;
+function trackIndex() {
+  if (indexedTracks !== state.tracks) { indexedTracks = state.tracks; index = new Map(state.tracks.map(track => [track.id, track])); }
+  return index;
 }
 
 /** Human-readable song count for a playlist */
 export function playlistSummary(playlist) {
-  const n = playlistTracks(playlist).length;
+  const n = (playlist.trackIds || []).length;
   return `${n} ${n === 1 ? "song" : "songs"}`;
 }
 

@@ -8,7 +8,6 @@ import { setStorage } from "./storage.js";
 
 export function updateVolumeUI() {
   const volume = el.audio.muted ? 0 : el.audio.volume;
-  el.volProgress.style.height = `${Math.max(0, Math.min(1, volume)) * 100}%`;
 
   let iconKey = "volume-high";
   if (volume === 0 || el.audio.muted) iconKey = "volume-mute";
@@ -17,18 +16,7 @@ export function updateVolumeUI() {
   el.muteBtn.innerHTML = icons[iconKey] || "";
 }
 
-function setVolumeAt(clientY) {
-  const rect = el.volScrubberBg.getBoundingClientRect();
-  if (!rect.height) return;
-  const ratio = Math.min(1, Math.max(0, (rect.bottom - clientY) / rect.height));
-  el.audio.volume = ratio;
-  if (ratio > 0) el.audio.muted = false;
-  updateVolumeUI();
-  setStorage("amp-volume", ratio);
-}
-
 let scrubbing = false;
-let volScrubbing = false;
 
 function scrubAt(clientX) {
   const rect = el.scrubberBar.getBoundingClientRect();
@@ -52,14 +40,8 @@ el.scrubberBar.addEventListener("touchstart", event => {
   event.preventDefault();
 }, { passive: false });
 
-el.volScrubberBg.addEventListener("mousedown", event => {
-  volScrubbing = true;
-  setVolumeAt(event.clientY);
-});
-
 document.addEventListener("mousemove", event => {
   if (scrubbing) scrubAt(event.clientX);
-  if (volScrubbing) setVolumeAt(event.clientY);
 });
 document.addEventListener("touchmove", event => {
   if (scrubbing && event.touches[0]) {
@@ -69,11 +51,9 @@ document.addEventListener("touchmove", event => {
 }, { passive: false });
 document.addEventListener("mouseup", () => {
   scrubbing = false;
-  volScrubbing = false;
 });
 document.addEventListener("touchend", () => {
   scrubbing = false;
-  volScrubbing = false;
 });
 
 el.muteBtn.addEventListener("click", () => {
@@ -97,7 +77,7 @@ el.audio.addEventListener("pause", () => {
   renderTransport();
   renderGrid();
 });
-el.audio.addEventListener("ended", nextTrack);
+el.audio.addEventListener("ended", () => nextTrack(true));
 
 el.audio.addEventListener("waiting", () => {
   state.buffering = true;
@@ -123,11 +103,25 @@ el.audio.addEventListener("error", () => {
   const error = el.audio.error;
   const message = (error && codes[error.code]) || "An audio error occurred.";
   state.buffering = false;
-  state.currentTrackId = null;
+  state.playbackError = message;
+  el.audio.pause();
+  el.audio.removeAttribute("src");
   showToast(`Warning: ${message}`);
   renderTransport();
   renderGrid();
   renderNowPlaying();
+  updateProgress();
+});
+
+el.audio.addEventListener("volumechange", () => {
+  setStorage("amp-volume", el.audio.volume);
+  setStorage("amp-muted", el.audio.muted);
+  updateVolumeUI();
+  const range = document.getElementById("volumeRange");
+  if (range) range.value = String(el.audio.muted ? 0 : el.audio.volume);
+});
+document.getElementById("volumeRange")?.addEventListener("input", event => {
+  el.audio.volume = Number(event.target.value); el.audio.muted = false;
 });
 
 el.seekRange?.addEventListener("input", () => {

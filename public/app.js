@@ -1,9 +1,10 @@
+import { showTrackDetails, reorderPlaylist, exportPlaylist } from "./modules/manage-library.js";
 import { state } from "./modules/state.js";
 import { hydrateIcons } from "./modules/icons.js";
 import { api } from "./modules/api.js";
 import { el } from "./modules/dom.js";
 import { showToast } from "./modules/toast.js";
-import { groupTracks } from "./modules/groups.js";
+import { refreshLibrary, ensureTracks, matchingTrackIds, loadLibraryPage } from "./modules/library-data.js";
 import {
   render,
   renderGrid,
@@ -23,12 +24,14 @@ import {
   moveQueueItem,
   playPlaylist,
   restoreQueue,
+  reconcileQueue,
+  updatePlayingMetadata,
   storedVolume,
   setShuffle,
   cycleRepeat
 } from "./modules/player.js";
 import { updateVolumeUI } from "./modules/audio.js";
-import { openImportSheet, closeImportSheet, doImport, chooseLibraryFolder, directoryFromDrop, forgetLibrarySource, refreshLibrarySources } from "./modules/import-lib.js";
+import { openImportSheet, closeImportSheet, doImport, chooseLibraryFolder, directoryFromDrop, forgetLibrarySource, refreshLibrarySources, recoverScan } from "./modules/import-lib.js";
 import {
   closePlaylistPicker,
   createPlaylistFromPicker,
@@ -49,38 +52,36 @@ import { toggleFavorite } from "./modules/favorites.js";
 import { initVisualizer } from "./modules/visualizer.js";
 import "./modules/shortcuts.js";
 
-const DOUBLE_PLAY_WINDOW_MS = 650;
-const SINGLE_SELECT_DELAY_MS = 420;
-let pendingTrackActivation = { id: null, at: 0, timer: null };
+document.addEventListener("error", event => {
+  const image = event.target;
+  if (!(image instanceof HTMLImageElement)) return;
+  if (image.dataset.fallbackApplied || image.getAttribute("src") === "/assets/default-cover.svg") return;
+  image.dataset.fallbackApplied = "true";
+  image.src = "/assets/default-cover.svg";
+}, true);
 
-function cancelPendingTrackActivation() {
-  window.clearTimeout(pendingTrackActivation.timer);
-  pendingTrackActivation = { id: null, at: 0, timer: null };
-}
+const DOUBLE_PLAY_WINDOW_MS = 650;
+let lastTrackActivation = { id: null, at: 0 };
 
 function selectOrPlayTrack(trackId, event) {
   const now = Date.now();
-  const repeatedTap = pendingTrackActivation.id === trackId
-    && now - pendingTrackActivation.at <= DOUBLE_PLAY_WINDOW_MS;
+  const repeatedTap = lastTrackActivation.id === trackId
+    && now - lastTrackActivation.at <= DOUBLE_PLAY_WINDOW_MS;
   const browserDoubleTap = Number(event?.detail) >= 2;
 
   if (repeatedTap || browserDoubleTap) {
-    cancelPendingTrackActivation();
+    lastTrackActivation = { id: null, at: 0 };
     state.selectedTrackId = trackId;
     renderGrid();
     playTrack(trackId);
     return;
   }
 
-  window.clearTimeout(pendingTrackActivation.timer);
-  pendingTrackActivation = {
+  state.selectedTrackId = trackId;
+  renderGrid();
+  lastTrackActivation = {
     id: trackId,
-    at: now,
-    timer: window.setTimeout(() => {
-      state.selectedTrackId = trackId;
-      renderGrid();
-      pendingTrackActivation.timer = null;
-    }, SINGLE_SELECT_DELAY_MS)
+    at: now
   };
 }
 
@@ -98,10 +99,6 @@ window.addEventListener("unhandledrejection", event => {
   reportAppError(event.reason, "An action did not complete.");
 });
 
-function arrayOrEmpty(value) {
-  return Array.isArray(value) ? value : [];
-}
-
 function formatBytes(bytes) {
   const value = Number(bytes) || 0;
   if (value < 1024) return `${value} B`;
@@ -115,44 +112,57 @@ function formatBytes(bytes) {
   return `${next.toFixed(next >= 10 ? 1 : 2)} ${unit}`;
 }
 
-function syncLibraryFromServer(data) {
-  state.tracks = arrayOrEmpty(data.tracks);
-  state.playlists = arrayOrEmpty(data.playlists);
-
-  const lastPlayed = getStorage("amp-last-played", "");
-  const hasLast = state.tracks.some(track => track.id === lastPlayed);
-  state.selectedTrackId = hasLast ? lastPlayed : (state.tracks[0]?.id || null);
-  state.currentTrackId = null;
-  state.queue = state.tracks.map(track => track.id);
-  state.queueIndex = -1;
-}
+let queueReady = false;
+document.addEventListener('library-page-updated', render);
+document.addEventListener('tracks-cached', render);
+document.addEventListener('library-updated', () => {
+  if (queueReady) {
+    reconcileQueue();
+    if (!state.trackIds.includes(state.currentTrackId)) {
+      state.currentTrackId = null; el.audio.pause(); el.audio.removeAttribute('src');
+    }
+  }
+  updatePlayingMetadata(); renderPlaylistsSidebar(); render();
+});
 
 async function loadState() {
-  const [health, data, recent] = await Promise.all([
-    api("/api/health", { timeoutMs: 15_000 }).catch(error => ({ ok: false, ffmpeg: error.message })),
-    api("/api/state", { timeoutMs: 30_000 }).catch(error => ({ tracks: [], playlists: [], error: error.message })),
-    api("/api/recent", { timeoutMs: 10_000 }).catch(() => ({ recentTracks: [] }))
+  const [health, result] = await Promise.all([
+    api('/api/health', { timeoutMs: 15000 }).catch(error => error.data || { ok: false, error: error.message }),
+    refreshLibrary({ initial: !queueReady }).then(() => ({ ok: true })).catch(error => ({ error: error.message }))
   ]);
-
-  state.health = health;
-  syncLibraryFromServer(data);
-  restoreQueue();
-  state.recentIds = (Array.isArray(recent.recentTracks) ? recent.recentTracks : []).map(track => track.id);
-
+  const status = document.getElementById('appStatus');
+  status.querySelector('span').textContent = result.error || '';
+  document.getElementById('retryLoadButton').hidden = !result.error;
+  status.classList.toggle('has-error', Boolean(result.error));
+  if (result.error) return;
+  if (!queueReady) {
+    state.queue = state.trackIds;
+    restoreQueue(); queueReady = true;
+    const lastPlayed = getStorage('amp-last-played', '');
+    if (!state.currentTrackId && state.trackIds.includes(lastPlayed)) state.selectedTrackId = lastPlayed;
+  }
+  await ensureTracks([state.currentTrackId, state.selectedTrackId].filter(Boolean));
   if (!health.ok) {
-    showToast(`Warning: FFmpeg not found. Playback unavailable. ${health.ffmpeg || ""}`, 8000);
+    const checks = health.checks || {};
+    const unavailableTools = [
+      checks.ffmpeg === false ? "FFmpeg" : null,
+      checks.ffprobe === false ? "FFprobe" : null
+    ].filter(Boolean);
+    const warning = unavailableTools.length
+      ? `${unavailableTools.join(" and ")} unavailable. Playback or import may be limited.`
+      : checks.database === false
+        ? "The database health check failed. Some library actions may not work."
+        : `Health check unavailable. ${health.error || health.ffmpeg || ""}`;
+    showToast(`Warning: ${warning}`, 8000);
   }
-  if (data.error) {
-    showToast(`Warning: ${data.error}`, 6000);
-  }
-
   toggleEmptyState();
-  setView(state.activeView, true);
   renderPlaylistsSidebar();
   render();
   refreshLibrarySources().catch(() => {});
+  recoverScan().catch(() => {});
 
   el.audio.volume = storedVolume();
+  el.audio.muted=getStorage("amp-muted","false")==="true";
   updateVolumeUI();
 }
 
@@ -208,7 +218,7 @@ document.addEventListener("click", event => {
     if (trackPlaylist) {
       event.preventDefault();
       event.stopPropagation();
-      openPlaylistPicker(trackPlaylist.dataset.trackPlaylist, event);
+      openPlaylistPicker(trackPlaylist.dataset.trackPlaylist);
       return;
     }
 
@@ -216,19 +226,25 @@ document.addEventListener("click", event => {
     if (favorite) {
       event.preventDefault();
       event.stopPropagation();
-      const added = toggleFavorite(favorite.dataset.trackFavorite);
-      showToast(added ? "Added to favorites" : "Removed from favorites", 1800);
-      renderGrid();
+      favorite.disabled=true;
+      toggleFavorite(favorite.dataset.trackFavorite).then(added=>{ showToast(added ? "Added to favorites" : "Removed from favorites"); renderGrid(); }).catch(showActionError).finally(()=>{favorite.disabled=false;});
       return;
     }
 
-    const loadMore = event.target.closest("[data-load-more]");
-    if (loadMore) {
-      state.gridLimit += state.gridPageSize;
-      renderGrid();
-      return;
-    }
-
+    const details=event.target.closest("[data-track-details]");
+    if(details) {showTrackDetails(details.dataset.trackDetails).catch(showActionError);return;}
+    const playlistMove=event.target.closest("[data-playlist-move]");
+    if(playlistMove) {reorderPlaylist(playlistMove.dataset.playlistMove,Number(playlistMove.dataset.direction)).catch(showActionError);return;}
+    const exportButton=event.target.closest("[data-playlist-export]");
+    if(exportButton) {exportPlaylist(exportButton.dataset.playlistExport);return;}
+    if (event.target.closest('[data-library-retry]')) { loadLibraryPage({ force: true }); renderGrid(); return; }
+    const gridPage=event.target.closest("[data-grid-page]");
+    if(gridPage) {state.gridOffset=Math.max(0,(state.gridOffset || 0)+Number(gridPage.dataset.gridPage)*state.gridPageSize);renderGrid();el.contentScroll.scrollTop=0;return;}
+    const queueMove=event.target.closest("[data-queue-move]");
+    if(queueMove) {const from=Number(queueMove.dataset.queueMove);moveQueueItem(from,from+Number(queueMove.dataset.direction));return;}
+    const queuePage=event.target.closest("[data-queue-page]");
+    if(queuePage) {state.queuePage=Math.max(0,state.queuePage+Number(queuePage.dataset.queuePage));renderQueue();return;}
+    if(event.target.closest("[data-queue-current]")) {state.queuePage=Math.max(0,Math.floor(state.queueIndex/100));renderQueue();return;}
     const source = event.target.closest("[data-library-source]");
     if (source) {
       el.folderInputSheet.value = source.dataset.librarySource;
@@ -285,23 +301,14 @@ document.addEventListener("click", event => {
     if (groupItem) {
       const type = groupItem.dataset.groupType;
       const key = groupItem.dataset.groupKey;
-      const group = groupTracks(type).find(item => item.key === key);
-      if (!group) return;
-
       if (event.target.closest("[data-play-btn]")) {
         event.stopPropagation();
-        const ids = group.tracks.map(track => track.id);
-        if (ids.length) playTrack(ids[0], ids, 0);
+        matchingTrackIds({ groupType: type, groupKey: key }).then(ids => {
+          if (ids.length) return playTrack(ids[0], ids, 0);
+        }).catch(showActionError);
       } else {
-        openGroup(type, key);
+        openGroup(type, key, false, groupItem.dataset.groupName || groupItem.textContent.trim());
       }
-      return;
-    }
-
-    const navLink = event.target.closest(".nav-link[data-group-type]");
-    if (navLink) {
-      event.stopPropagation();
-      openGroup(navLink.dataset.groupType, navLink.dataset.groupKey);
       return;
     }
 
@@ -309,7 +316,7 @@ document.addEventListener("click", event => {
     if (card) {
       const trackId = card.dataset.trackId;
       if (event.target.closest("[data-play-btn]")) {
-        playTrack(trackId);
+        if(trackId===state.currentTrackId && el.audio.getAttribute("src")) playPause(); else playTrack(trackId);
         return;
       }
       selectOrPlayTrack(trackId, event);
@@ -333,7 +340,7 @@ document.addEventListener("click", event => {
       if (action === "play") playTrack(track.id);
       else if (action === "next") queueTrack(track.id, "next");
       else if (action === "queue") queueTrack(track.id, "end");
-      else if (action === "playlist") openPlaylistPicker(track.id, event);
+      else if (action === "playlist") openPlaylistPicker(track.id);
       else if (action === "remove-playlist") removeFromActivePlaylist(track.id).catch(showActionError);
       else if (action === "metadata") refreshTrackMetadata(track.id).catch(showActionError);
       else if (action === "copy") {
@@ -368,6 +375,11 @@ document.addEventListener("contextmenu", event => {
 el.playButton.addEventListener("click", playPause);
 el.nextButton.addEventListener("click", nextTrack);
 el.prevButton.addEventListener("click", prevTrack);
+el.fsPlayButton?.addEventListener("click", playPause);
+el.fsNextButton?.addEventListener("click", nextTrack);
+el.fsPrevButton?.addEventListener("click", prevTrack);
+el.fsShuffleButton?.addEventListener("click", () => setShuffle(!state.shuffle));
+el.fsRepeatButton?.addEventListener("click", cycleRepeat);
 el.shuffleButton.addEventListener("click", event => {
   event.stopPropagation();
   setShuffle(!state.shuffle);
@@ -416,6 +428,7 @@ el.headerCols.forEach(column => {
       state.sortField = field;
       state.sortDir = "asc";
     }
+    state.gridOffset = 0;
     setStorage("amp-sort-field", state.sortField);
     setStorage("amp-sort-dir", state.sortDir);
     renderGrid();
@@ -505,7 +518,7 @@ el.searchInput.addEventListener("input", event => {
     }
     state.activeGroup = null;
     state.activeView = "search";
-    state.gridLimit = state.gridPageSize;
+    state.gridOffset=0;
     el.navItems.forEach(button => button.classList.remove("is-active"));
     render();
     return;
@@ -513,8 +526,30 @@ el.searchInput.addEventListener("input", event => {
 
   const target = state.searchReturn;
   state.searchReturn = null;
-  state.gridLimit = state.gridPageSize;
-  if (target?.group) openGroup(target.group.type, target.group.key, true);
+  state.gridOffset=0;
+  if (target?.group) openGroup(target.group.type, target.group.key, true, target.group.name);
   else if (target?.playlist) openPlaylist(target.playlist, true);
   else setView(target?.view || "home", true);
+});
+
+document.getElementById("mobileImportButton").addEventListener("click",openImportSheet);
+document.getElementById("mobilePlaylistButton").addEventListener("click",createPlaylistFromButton);
+document.getElementById("retryLoadButton").addEventListener("click",()=>loadState().catch(reportAppError));
+document.getElementById("retryPlaybackButton").addEventListener("click", playPause);
+document.addEventListener("keydown",event=>{
+  const card=event.target.closest("article.grid-card");
+  if(!card || event.target!==card) return;
+  if(event.key==="Enter" || event.key===" ") {
+    event.preventDefault();
+    if(card.dataset.trackId) {if(card.dataset.trackId===state.currentTrackId && el.audio.getAttribute("src")) playPause();else playTrack(card.dataset.trackId);}
+    else card.click();
+  } else if(event.key==="ContextMenu" || (event.shiftKey && event.key==="F10")) {
+    if(!card.dataset.trackId) return;
+    event.preventDefault();const rect=card.getBoundingClientRect();showCtx(rect.left,rect.top,card.dataset.trackId);el.contextMenu.querySelector("button")?.focus();
+  }
+});
+window.addEventListener("storage",event=>{
+  if(event.key==="amp-volume") el.audio.volume=storedVolume();
+  if(event.key==="amp-layout") {state.layout=getStorage("amp-layout","grid");render();}
+  if(event.key==="amp-favorite-tracks") refreshLibrary().catch(()=>{});
 });

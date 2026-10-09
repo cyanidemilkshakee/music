@@ -1,11 +1,12 @@
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-export class ApiError extends Error {
+class ApiError extends Error {
   constructor(message, options = {}) {
     super(message);
     this.name = "ApiError";
     this.status = options.status || 0;
     this.requestId = options.requestId || "";
+    this.data = options.data || null;
   }
 }
 
@@ -53,7 +54,23 @@ async function readResponseBody(res) {
   return { error: await res.text() };
 }
 
-export async function api(path, options = {}) {
+let sessionPromise = null;
+let mutationChain = Promise.resolve();
+async function sessionToken() {
+  sessionPromise ||= fetch("/api/session", { cache: "no-store", signal: AbortSignal.timeout(5000) }).then(async response => {
+    if (!response.ok) throw new ApiError("Could not open a local session.");
+    return (await response.json()).token;
+  }).catch(error => { sessionPromise = null; throw error; });
+  return sessionPromise;
+}
+export function api(path, options = {}) {
+  if (!options.method || ["GET", "HEAD"].includes(options.method.toUpperCase())) return request(path, options);
+  if (!/^\/api\/(playlists|favorites|recent|backup|tracks)(\/|$)/.test(path)) return request(path, options);
+  const result = mutationChain.then(() => request(path, options));
+  mutationChain = result.catch(() => {});
+  return result;
+}
+async function request(path, options = {}) {
   const {
     timeoutMs = DEFAULT_TIMEOUT_MS,
     headers = {},
@@ -69,16 +86,25 @@ export async function api(path, options = {}) {
   }
 
   try {
-    const res = await fetch(path, {
+    if (fetchOptions.method && !["GET", "HEAD"].includes(fetchOptions.method.toUpperCase())) {
+      requestHeaders.set("x-local-amp-token", await sessionToken());
+    }
+    let res = await fetch(path, {
       ...fetchOptions,
       headers: requestHeaders,
       signal: merged.signal
     });
+    if (res.status === 403 && requestHeaders.has("x-local-amp-token")) {
+      sessionPromise = null;
+      requestHeaders.set("x-local-amp-token", await sessionToken());
+      res = await fetch(path, { ...fetchOptions, headers: requestHeaders, signal: merged.signal });
+    }
     const data = await readResponseBody(res);
     if (!res.ok) {
       throw new ApiError(data.detail || data.error || `Request failed (${res.status}).`, {
         status: res.status,
-        requestId: data.requestId || res.headers.get("x-request-id") || ""
+        requestId: data.requestId || res.headers.get("x-request-id") || "",
+        data
       });
     }
     return data;
@@ -90,7 +116,7 @@ export async function api(path, options = {}) {
     if (timeout?.controller.signal.aborted || error?.name === "AbortError" || error?.name === "TimeoutError") {
       throw new ApiError("The request took too long. Please try again.");
     }
-    throw new ApiError("Could not reach the Local Amp server. Is it running on port 1111?");
+    throw new ApiError("Could not reach the Local Amp server. Restart it and try again.");
   } finally {
     merged.cleanup();
     if (timeout?.timer) clearTimeout(timeout.timer);
