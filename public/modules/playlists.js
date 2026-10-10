@@ -1,4 +1,4 @@
-import { state, DEFAULT_COVER } from "./state.js";
+import { state } from "./state.js";
 import { el } from "./dom.js";
 import { api } from "./api.js";
 import { showToast } from "./toast.js";
@@ -7,6 +7,7 @@ import { openPlaylist, setView } from "./navigation.js";
 import { activePlaylist } from "./helpers.js";
 import { esc, coverUrl, cssEscape, trackTitle } from "./utils.js";
 import { trapModalFocus } from "./modal-focus.js";
+import { refreshLibrary } from './library-data.js';
 
 let creatingPlaylist = false;
 const playlistOps = new Set();
@@ -33,7 +34,7 @@ function rerenderPlaylists() {
   render();
 }
 
-export async function createPlaylist(name = "") {
+async function createPlaylist(name = "") {
   if (creatingPlaylist) return null;
   creatingPlaylist = true;
   try {
@@ -71,23 +72,6 @@ export async function createPlaylistFromButton() {
   if (playlist) openPlaylist(playlist.id);
 }
 
-async function addTrackToPlaylistId(playlistId, trackId) {
-  const opKey = `${playlistId}:${trackId}:add`;
-  if (playlistOps.has(opKey)) return null;
-  playlistOps.add(opKey);
-  try {
-    const data = await api(`/api/playlists/${encodeURIComponent(playlistId)}/tracks`, {
-      method: "POST",
-      body: JSON.stringify({ trackId }),
-      timeoutMs: 15_000
-    });
-    syncPlaylists(data);
-    return data.playlist || null;
-  } finally {
-    playlistOps.delete(opKey);
-  }
-}
-
 async function removeTrackFromPlaylistId(playlistId, trackId) {
   const opKey = `${playlistId}:${trackId}:remove`;
   if (playlistOps.has(opKey)) return null;
@@ -104,24 +88,21 @@ async function removeTrackFromPlaylistId(playlistId, trackId) {
   }
 }
 
-export async function setTrackPlaylistMembership(trackId, selectedPlaylistIds, options = {}) {
+async function setTrackPlaylistMembership(trackId, selectedPlaylistIds, options = {}) {
   if (!trackId) return;
 
-  if (options.onlyPlaylistId) {
-    await addTrackToPlaylistId(options.onlyPlaylistId, trackId);
-  } else {
-    const existing = new Set(
-      state.playlists
-        .filter(playlist => (playlist.trackIds || []).includes(trackId))
-        .map(playlist => playlist.id)
-    );
-    const selected = new Set(selectedPlaylistIds);
-    const adds = [...selected].filter(id => !existing.has(id));
-    const removes = [...existing].filter(id => !selected.has(id));
-
-    for (const playlistId of adds) await addTrackToPlaylistId(playlistId, trackId);
-    for (const playlistId of removes) await removeTrackFromPlaylistId(playlistId, trackId);
-  }
+  const selected = [...selectedPlaylistIds];
+  const current = state.playlists.filter(playlist => playlist.trackIds.includes(trackId)).map(playlist => playlist.id);
+  const added = selected.filter(id => !current.includes(id));
+  const removed = current.filter(id => !selected.includes(id));
+  const data = added.length === 1 && removed.length === 0
+    ? await api('/api/playlists/' + encodeURIComponent(added[0]) + '/tracks', {
+      method: 'POST', body: JSON.stringify({ trackId }), timeoutMs: 15000
+    })
+    : await api("/api/tracks/"+encodeURIComponent(trackId)+"/playlists", {
+      method:"PUT", body:JSON.stringify({playlistIds:selected}), timeoutMs:15000
+    });
+  syncPlaylists(data);
 
   renderPlaylistsSidebar();
   if (state.activePlaylistId) renderGrid();
@@ -181,7 +162,7 @@ function buildDialog(title, bodyHtml) {
   const overlay = document.createElement("div");
   overlay.className = "glass-dialog-layer is-open";
   overlay.innerHTML = `
-    <div class="glass-dialog" role="dialog" aria-modal="true">
+    <div class="glass-dialog" role="dialog" aria-modal="true" aria-label="${esc(title)}">
       <h2>${esc(title)}</h2>
       ${bodyHtml}
     </div>`;
@@ -195,7 +176,7 @@ function buildDialog(title, bodyHtml) {
 function askPlaylistName(currentName) {
   return new Promise(resolve => {
     const overlay = buildDialog("Rename Playlist", `
-      <input class="glass-dialog-input" value="${esc(currentName)}" maxlength="120">
+      <input aria-label="Playlist name" class="glass-dialog-input" value="${esc(currentName)}" maxlength="120">
       <div class="glass-dialog-actions">
         <button class="glass-btn" data-dialog-cancel type="button">Cancel</button>
         <button class="glass-btn glass-btn-primary" data-dialog-save type="button">Save</button>
@@ -246,7 +227,7 @@ function renderPlaylistPicker() {
   if (!track) return;
 
   el.playlistPickerTrack.innerHTML = `
-    <img src="${coverUrl(track)}" alt="" onerror="this.onerror=null;this.src='${DEFAULT_COVER}'">
+    <img src="${coverUrl(track)}" alt="">
     <span>
       <strong>${esc(trackTitle(track))}</strong>
       <small>${esc(track.artist || "Unknown Artist")}</small>
@@ -266,50 +247,17 @@ function renderPlaylistPicker() {
   el.playlistPickerList.innerHTML = state.playlists.map(playlist => `
     <label class="picker-row">
       <input type="checkbox" data-picker-playlist="${esc(playlist.id)}" ${memberships.has(playlist.id) ? "checked" : ""}>
-      <span class="picker-check"></span>
       <span class="picker-name">${esc(playlist.name)}</span>
       <span class="picker-count">${(playlist.trackIds || []).length}</span>
     </label>
   `).join("");
 }
 
-export function openPlaylistPicker(trackId, event) {
+export function openPlaylistPicker(trackId) {
   if (!state.tracks.some(track => track.id === trackId)) return;
   pickerTrackId = trackId;
   renderPlaylistPicker();
-  
-  if (event) {
-    const glass = el.playlistPicker.querySelector(".playlist-picker-glass");
-    const rect = (event.target.closest("button, .ctx-item") || event.target).getBoundingClientRect();
-    
-    const boxWidth = 375;
-    const boxHeight = 400; // rough estimate of max height
-    
-    // Default to positioning it above the clicked element, centered horizontally
-    let left = rect.left + rect.width / 2 - boxWidth / 2;
-    let bottom = window.innerHeight - rect.top + 15;
-    
-    // Clamp to screen bounds
-    if (left < 10) left = 10;
-    if (left + boxWidth > window.innerWidth - 10) left = window.innerWidth - boxWidth - 10;
-    
-    if (bottom < 10) bottom = 10;
-    if (bottom + boxHeight > window.innerHeight - 10) bottom = window.innerHeight - boxHeight - 10;
-    
-    glass.style.right = 'auto';
-    glass.style.left = `${left}px`;
-    glass.style.bottom = `${bottom}px`;
-    
-    // Position the arrow so it points directly at the click target
-    let arrowLeft = rect.left + rect.width / 2 - left - 6;
-    
-    // Clamp arrow so it doesn't fall off the rounded corners of the glass box
-    if (arrowLeft < 20) arrowLeft = 20;
-    if (arrowLeft > boxWidth - 32) arrowLeft = boxWidth - 32;
-    
-    glass.style.setProperty("--arrow-left", `${arrowLeft}px`);
-  }
-  
+
   el.playlistPicker.classList.remove("is-hidden");
   el.playlistPicker.setAttribute("aria-hidden", "false");
   el.playlistPicker._releaseFocus?.();
@@ -329,13 +277,14 @@ export function closePlaylistPicker() {
 
 export async function savePlaylistPicker() {
   const track = currentPickerTrack();
-  if (!track) return;
+  if (!track || el.playlistPickerDone.disabled) return;
+  el.playlistPickerDone.disabled=true;
   const selected = new Set(
     [...el.playlistPickerList.querySelectorAll("[data-picker-playlist]:checked")]
       .map(input => input.dataset.pickerPlaylist)
   );
-  await setTrackPlaylistMembership(track.id, selected, { toast: "Playlist membership updated" });
-  closePlaylistPicker();
+  try { await setTrackPlaylistMembership(track.id, selected, { toast: "Playlist membership updated" }); closePlaylistPicker(); }
+  finally { el.playlistPickerDone.disabled=false; }
 }
 
 export async function createPlaylistFromPicker() {
@@ -356,11 +305,7 @@ export async function refreshTrackMetadata(trackId) {
     });
     if (!data.track) return;
 
-    state.tracks = state.tracks.map(track => track.id === trackId ? data.track : track);
-    if (state.selectedTrackId === trackId) state.selectedTrackId = data.track.id;
-    if (state.currentTrackId === trackId) state.currentTrackId = data.track.id;
-    state.queue = state.queue.map(id => id === trackId ? data.track.id : id);
-    render();
+    await refreshLibrary();
     showToast("Metadata refreshed", 2000);
   } finally {
     metadataOps.delete(trackId);

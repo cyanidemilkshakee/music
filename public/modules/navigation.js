@@ -1,27 +1,27 @@
 // ── Navigation & History ─────────────────────────────────────────────────────
 import { state } from "./state.js";
 import { el }    from "./dom.js";
-import { groupTracks } from "./groups.js";
-import { render, renderViewTitle, renderGrid, renderPlaylistsSidebar } from "./render.js";
+import { render, renderPlaylistsSidebar } from "./render.js";
 import { cssEscape } from "./utils.js";
 
 const VALID_VIEWS = new Set(["home", "recent", "artists", "albums", "songs", "playlists", "search"]);
 const MAX_HISTORY_ITEMS = 100;
 
 // ── Back Button ───────────────────────────────────────────────────────────────
-export function updateBackButton() {
+function updateBackButton() {
   if (!el.backButton) return;
   const has = state.history.length > 0;
   el.backButton.style.opacity       = has ? "1" : "0.5";
   el.backButton.style.pointerEvents = has ? "auto" : "none";
 }
 
-export function pushHistory() {
+function pushHistory() {
   state.history.push({
     view:     state.activeView,
     group:    state.activeGroup ? { ...state.activeGroup } : null,
     playlist: state.activePlaylistId,
-    search:   state.search
+    search:   state.search,
+    sortField: state.sortField, sortDir: state.sortDir, filters: {...state.filters}, offset: state.gridOffset
   });
   if (state.history.length > MAX_HISTORY_ITEMS) {
     state.history.splice(0, state.history.length - MAX_HISTORY_ITEMS);
@@ -43,38 +43,39 @@ export function setView(view, skipHistory = false) {
   state.activeView      = view;
   state.activePlaylistId = null;
   state.activeGroup     = null;
-  state.sortField       = "none";
-  state.sortDir         = "asc";
-  state.gridLimit       = state.gridPageSize;
   clearSearchState();
+  state.gridOffset = 0;
 
   el.navItems.forEach(btn =>
     btn.classList.toggle("is-active", btn.dataset.view === view)
   );
 
-  renderViewTitle();
-  renderGrid();
+  render();
   renderPlaylistsSidebar();
+  el.contentScroll.scrollTop = 0;
 }
 
-export function openGroup(type, key, skipHistory = false) {
-  const group = groupTracks(type).find(g => g.key === key);
-  if (!group) return;
+export function openGroup(type, key, skipHistory = false, name = '') {
+  if (!['album', 'artist'].includes(type) || !key.startsWith(type + ':')) return;
+  const group = state.libraryPage.groups.find(item => item.key === key);
+  if (!name) {
+    name = group?.name || key.slice(type.length + 1);
+    if (!group && type === 'album') { try { name = JSON.parse(key.slice(6))[0]; } catch { /* Invalid keys are rejected by the server. */ } }
+  }
   if (!skipHistory) pushHistory();
 
   state.activeView       = type === "album" ? "albums" : "artists";
   state.activePlaylistId = null;
-  state.activeGroup      = { type, key, name: group.name };
-  state.sortField        = "none";
-  state.sortDir          = "asc";
-  state.gridLimit        = state.gridPageSize;
+  state.activeGroup      = { type, key, name };
   clearSearchState();
+  state.gridOffset = 0;
 
   el.navItems.forEach(btn =>
     btn.classList.toggle("is-active", btn.dataset.view === state.activeView)
   );
   render();
   renderPlaylistsSidebar();
+  el.contentScroll.scrollTop = 0;
 }
 
 export function openPlaylist(playlistId, skipHistory = false) {
@@ -85,10 +86,8 @@ export function openPlaylist(playlistId, skipHistory = false) {
   state.activeView       = "playlists";
   state.activePlaylistId = playlist.id;
   state.activeGroup      = null;
-  state.sortField        = "none";
-  state.sortDir          = "asc";
-  state.gridLimit        = state.gridPageSize;
   clearSearchState();
+  state.gridOffset = 0;
 
   el.navItems.forEach(btn => btn.classList.remove("is-active"));
   const btn = document.querySelector(`[data-playlist-id="${cssEscape(playlist.id)}"]`);
@@ -96,6 +95,7 @@ export function openPlaylist(playlistId, skipHistory = false) {
 
   render();
   renderPlaylistsSidebar();
+  el.contentScroll.scrollTop = 0;
 }
 
 // ── Back Navigation ───────────────────────────────────────────────────────────
@@ -105,12 +105,15 @@ export function goBack() {
   updateBackButton();
 
   if (prev.group) {
-    openGroup(prev.group.type, prev.group.key, true);
+    openGroup(prev.group.type, prev.group.key, true, prev.group.name);
   } else if (prev.playlist) {
     openPlaylist(prev.playlist, true);
   } else {
-    state.search = prev.search || "";
-    if (el.searchInput) el.searchInput.value = state.search;
     setView(prev.view, true);
   }
+  state.search=prev.search || "";
+  state.sortField=prev.sortField || "none"; state.sortDir=prev.sortDir || "asc";
+  state.filters=prev.filters || state.filters; state.gridOffset=prev.offset || 0;
+  if(el.searchInput) el.searchInput.value=state.search;
+  render();
 }

@@ -3,10 +3,7 @@ import { el } from "./dom.js";
 
 const any = "";
 
-function values(field) {
-  return [...new Set(state.tracks.map(track => String(track[field] || "").trim()).filter(Boolean))]
-    .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
-}
+function values(field) { return state.facets[field] || []; }
 
 function options(items, selected, emptyLabel) {
   return [`<option value="">${emptyLabel}</option>`, ...items.map(value =>
@@ -41,23 +38,10 @@ export function updateFiltersFromForm() {
     favorite: Boolean(el.filterFavorite?.checked),
     recentlyPlayed: Boolean(el.filterRecent?.checked),
   };
-  state.gridLimit = state.gridPageSize;
+  state.gridOffset = 0;
 }
 
 export function clearFilters() {
   state.filters = { genre: any, year: any, codec: any, duration: any, favorite: false, recentlyPlayed: false };
-  state.gridLimit = state.gridPageSize;
-}
-
-export function matchesTrackFilters(track, isFavorite) {
-  const filter = state.filters;
-  if (filter.genre && String(track.genre || "") !== filter.genre) return false;
-  if (filter.year && String(track.year || "") !== filter.year) return false;
-  if (filter.codec && String(track.codec || "") !== filter.codec) return false;
-  if (filter.favorite && !isFavorite(track.id)) return false;
-  if (filter.recentlyPlayed && !state.recentIds.includes(track.id)) return false;
-  if (filter.duration === "short" && Number(track.duration) >= 180) return false;
-  if (filter.duration === "medium" && (Number(track.duration) < 180 || Number(track.duration) > 360)) return false;
-  if (filter.duration === "long" && Number(track.duration) <= 360) return false;
-  return true;
+  state.gridOffset = 0;
 }

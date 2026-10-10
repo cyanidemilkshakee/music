@@ -23,11 +23,23 @@ export function renderNowPlaying() {
 }
 
 export function renderTransport() {
+  const status = document.getElementById("playbackStatus");
+  status.hidden = !state.playbackError && !state.buffering;
+  status.querySelector("span").textContent = state.playbackError || "Preparing audio…";
+  document.getElementById("retryPlaybackButton").hidden = !state.playbackError;
+  document.getElementById("playbackQuality").textContent = ({ original: "Original audio", flac: "Lossless FLAC fallback", mp3: "MP3 compatibility conversion" })[state.playbackFormat] || "";
+  el.playButton.setAttribute("aria-label", el.audio.paused ? "Play" : "Pause");
+  el.playButton.title = el.audio.paused ? "Play" : "Pause";
+  el.fsPlayButton?.setAttribute("aria-label", el.playButton.title);
+  el.shuffleButton.setAttribute("aria-pressed", String(state.shuffle));
+  el.fsShuffleButton?.setAttribute("aria-pressed", String(state.shuffle));
+  el.repeatButton.setAttribute("aria-pressed", String(state.repeat !== "none"));
   el.playerPill.classList.toggle("is-playing", Boolean(state.currentTrackId && !el.audio.paused));
   el.shuffleButton.classList.toggle("is-active", state.shuffle);
   el.repeatButton.classList.toggle("is-active", state.repeat !== "none");
   el.repeatButton.innerHTML = state.repeat === "one" ? icons["repeat-one"] : icons.repeat;
   el.repeatButton.title = state.repeat === "none" ? "Repeat off" : state.repeat === "all" ? "Repeat all" : "Repeat one";
+  el.repeatButton.setAttribute("aria-label", el.repeatButton.title);
   el.fsShuffleButton?.classList.toggle("is-active", state.shuffle);
   if (el.fsShuffleButton) el.fsShuffleButton.title = state.shuffle ? "Shuffle on" : "Shuffle off";
   el.fsRepeatButton?.classList.toggle("is-active", state.repeat !== "none");
@@ -56,7 +68,12 @@ export function updateProgress() {
   if (el.fsTimeRemaining) el.fsTimeRemaining.textContent = `-${fmt(Math.max(0, duration - current))}`;
   if (el.scrubberProgress) el.scrubberProgress.style.width = `${percent}%`;
   if (el.scrubberHandle) el.scrubberHandle.style.left = `${percent}%`;
-  if (el.seekRange) { el.seekRange.max = String(Math.max(0, Math.round(duration))); el.seekRange.value = String(Math.min(Math.round(current), Math.max(0, Math.round(duration)))); }
+  if (el.seekRange) {
+    el.seekRange.disabled = !state.currentTrackId || !Number.isFinite(el.audio.duration) || !el.audio.seekable.length;
+    el.seekRange.max = String(Math.max(0, Math.round(duration)));
+    el.seekRange.value = String(Math.min(Math.round(current), Math.max(0, Math.round(duration))));
+    el.seekRange.setAttribute("aria-valuetext", `${fmt(current)} of ${fmt(duration)}`);
+  }
 }
 
 export function renderLayoutToggle() {

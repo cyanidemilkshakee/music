@@ -3,7 +3,6 @@ import { state } from "./state.js";
 import { el }    from "./dom.js";
 import { icons } from "./icons.js";
 import { activePlaylist } from "./helpers.js";
-import { esc } from "./utils.js";
 
 let ctxTrackId = null;
 

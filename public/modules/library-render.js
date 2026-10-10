@@ -1,95 +1,86 @@
-import { state, DEFAULT_COVER } from "./state.js";
-import { icons } from "./icons.js";
-import { el } from "./dom.js";
-import { esc, fmt, coverUrl, trackTitle, makeGroupKey } from "./utils.js";
-import { groupTracks, groupKindForView, groupSummary } from "./groups.js";
-import { activeGroup, activePlaylist, playlistSummary, firstPlaylistTrack } from "./helpers.js";
-import { getVisibleTracks } from "./sort.js";
-import { isFavorite } from "./favorites.js";
+import { state } from './state.js';
+import { icons } from './icons.js';
+import { el } from './dom.js';
+import { esc, fmt, coverUrl, trackTitle, makeGroupKey, albumKey } from './utils.js';
+import { groupKindForView, groupSummary } from './groups.js';
+import { loadLibraryPage } from './library-data.js';
+import { libraryPageKey } from './library-query.js';
+import { activeGroup, activePlaylist, playlistSummary, firstPlaylistTrack } from './helpers.js';
+import { getVisibleTracks } from './sort.js';
+import { isFavorite } from './favorites.js';
 
-let viewTransitionRunning = false;
-function withViewTransition(callback) {
-  if (!document.startViewTransition || viewTransitionRunning) return callback();
-  viewTransitionRunning = true;
-  try {
-    const transition = document.startViewTransition(callback);
-    transition.ready.catch(() => {});
-    transition.finished.catch(() => {}).finally(() => { viewTransitionRunning = false; });
-  }
-  catch { viewTransitionRunning = false; callback(); }
-}
-
-export function toggleEmptyState() {
-  const hasTracks = state.tracks.length > 0;
-  el.importPanel.classList.toggle("is-hidden", hasTracks);
-  el.contentScroll.classList.toggle("is-hidden", !hasTracks);
-}
-
-export function renderViewTitle() {
-  const group = activeGroup();
-  const playlist = activePlaylist();
-  if (group) { el.viewTitle.textContent = group.name; return; }
-  if (playlist) { el.viewTitle.textContent = playlist.name; return; }
-  const titles = { home: "Home", recent: "Recently Added", artists: "Artists", albums: "Albums", songs: "Songs", playlists: "All Playlists", search: "Search Results" };
-  el.viewTitle.textContent = titles[state.activeView] || "Library";
-}
-
-export function renderPlaylistsSidebar() {
-  el.sidebarPlaylistList.innerHTML = state.playlists.map(playlist => `<li><button class="nav-item ${playlist.id === state.activePlaylistId ? "is-active" : ""}" data-playlist-id="${esc(playlist.id)}"><span>${esc(playlist.name)}</span><span class="playlist-inline-actions"><span class="playlist-mini-action" data-playlist-rename="${esc(playlist.id)}" title="Rename playlist">${icons.edit || icons.album}</span><span class="playlist-mini-action" data-playlist-delete="${esc(playlist.id)}" title="Delete playlist">${icons.x}</span></span></button></li>`).join("");
-}
-
-export function renderGrid() { withViewTransition(renderGridContents); }
-
-function renderGridContents() {
-  if (state.activeView === "playlists" && !state.activePlaylistId) return renderPlaylistCollection();
-  const groupType = groupKindForView();
-  const showGroups = Boolean(groupType && !state.activeGroup);
-  const tracks = getVisibleTracks();
-  const isList = state.layout === "list";
-  el.trackGrid.classList.toggle("is-list", isList);
-  const showHeaders = isList && !showGroups && tracks.length > 0;
-  el.listHeaders?.classList.toggle("is-hidden", !showHeaders);
-  if (showHeaders) el.headerCols.forEach(column => {
-    const active = state.sortField === column.dataset.sort;
-    column.classList.toggle("is-active", active);
-    const icon = column.querySelector(".sort-icon");
-    if (icon) icon.innerHTML = active ? (state.sortDir === "asc" ? icons["arrow-down"] : icons["arrow-up"]) : "";
+let lastTracks, lastPlaylists, lastSignature, lastPage;
+function highlights() {
+  el.trackGrid.querySelectorAll('[data-track-id]').forEach(card => {
+    const current = card.dataset.trackId === state.currentTrackId;
+    card.classList.toggle('is-active', current);
+    card.classList.toggle('is-playing', current && !el.audio.paused);
+    card.classList.toggle('is-selected', card.dataset.trackId === state.selectedTrackId);
+    card.querySelector('[data-play-btn]')?.setAttribute('aria-label', current && !el.audio.paused ? 'Pause track' : 'Play track');
   });
-  if (showGroups) return renderGroups(groupType);
-  if (!tracks.length) {
-    el.trackGrid.innerHTML = `<div class="empty-grid-message">${state.search ? `No results for "${esc(state.search)}".` : "No tracks found."}</div>`;
-    return;
+}
+function page(items) {
+  state.gridOffset = Math.min(state.gridOffset || 0, Math.max(0, Math.floor((items.length - 1) / state.gridPageSize) * state.gridPageSize));
+  return items.slice(state.gridOffset, state.gridOffset + state.gridPageSize);
+}
+function pagination(total) {
+  if (total <= state.gridPageSize) return '';
+  const start = state.gridOffset;
+  return `<div class="page-controls"><button type="button" data-grid-page="-1" ${start === 0 ? 'disabled' : ''}>Previous</button><span>${start + 1}–${Math.min(total, start + state.gridPageSize)} of ${total}</span><button type="button" data-grid-page="1" ${start + state.gridPageSize >= total ? 'disabled' : ''}>Next</button></div>`;
+}
+export function toggleEmptyState() {
+  el.importPanel.classList.toggle('is-hidden', !state.libraryReady || state.trackIds.length > 0);
+  el.contentScroll.classList.toggle('is-hidden', !state.libraryReady || (state.trackIds.length === 0 && state.activeView !== 'playlists'));
+  if (state.activeView === 'playlists') el.importPanel.classList.add('is-hidden');
+}
+export function renderViewTitle() {
+  const group = activeGroup(), playlist = activePlaylist();
+  el.viewTitle.textContent = group?.name || playlist?.name || ({home:'Home', recent:'Recently Added', artists:'Artists', albums:'Albums', songs:'Songs', playlists:'All Playlists', search:'Search Results'})[state.activeView] || 'Library';
+}
+export function renderPlaylistsSidebar() {
+  el.sidebarPlaylistList.innerHTML = state.playlists.map(playlist => `<li class="sidebar-playlist"><button class="nav-item ${playlist.id === state.activePlaylistId ? 'is-active' : ''}" data-playlist-id="${esc(playlist.id)}"><span>${esc(playlist.name)}</span></button><div class="playlist-inline-actions"><button class="playlist-mini-action" data-playlist-rename="${esc(playlist.id)}" aria-label="Rename ${esc(playlist.name)}">${icons.edit}</button><button class="playlist-mini-action" data-playlist-delete="${esc(playlist.id)}" aria-label="Delete ${esc(playlist.name)}">${icons.x}</button></div></li>`).join('');
+}
+export function renderGrid() {
+  if (state.libraryPage.key !== libraryPageKey(state)) loadLibraryPage();
+  const signature = JSON.stringify([state.activeView, state.activeGroup, state.activePlaylistId, state.search, state.sortField, state.sortDir, state.layout, state.filters, state.gridOffset, state.favoriteRevision, state.recentIds]);
+  if (lastPage === state.libraryPage && lastTracks === state.tracks && lastPlaylists === state.playlists && lastSignature === signature) { highlights(); return; }
+  lastPage = state.libraryPage;
+  lastTracks = state.tracks; lastPlaylists = state.playlists; lastSignature = signature;
+  const focused = document.activeElement?.closest('[data-track-id]')?.dataset.trackId;
+  contents();
+  if (focused) el.trackGrid.querySelector(`[data-track-id="${CSS.escape(focused)}"]`)?.focus({preventScroll:true});
+}
+function contents() {
+  if (state.libraryPage.loading) { el.trackGrid.innerHTML = '<p class="empty-grid-message" role="status">Loading library…</p>'; el.listHeaders?.classList.add('is-hidden'); return; }
+  if (state.libraryPage.error) { el.trackGrid.innerHTML = `<div class="empty-grid-message" role="status">${esc(state.libraryPage.error)} <button type="button" data-library-retry>Retry</button></div>`; el.listHeaders?.classList.add('is-hidden'); return; }
+  const type = groupKindForView(), showGroups = type && !state.activeGroup;
+  const collection = state.activeView === 'playlists' && !state.activePlaylistId;
+  const tracks = getVisibleTracks(), playlist = activePlaylist();
+  el.trackGrid.classList.toggle('is-list', state.layout === 'list' && !collection);
+  const headers = state.layout === 'list' && !showGroups && !collection && tracks.length > 0;
+  el.listHeaders?.classList.toggle('is-hidden', !headers);
+  if (headers) el.headerCols.forEach(column => {
+    const active = state.sortField === column.dataset.sort;
+    column.setAttribute('aria-pressed', String(active));
+    column.title = active ? `Sorted ${state.sortDir === 'asc' ? 'ascending' : 'descending'}. Click to reverse.` : 'Sort by this column';
+    column.classList.toggle('is-active', active);
+    const icon = column.querySelector('.sort-icon');
+    if (icon) icon.innerHTML = active ? icons[state.sortDir === 'asc' ? 'arrow-down' : 'arrow-up'] : '';
+  });
+  let items, html;
+  if (collection) {
+    items = state.playlists;
+    html = page(items).map(playlist => `<article tabindex="0" class="grid-card group-card" data-playlist-card-id="${esc(playlist.id)}" aria-label="Playlist ${esc(playlist.name)}"><div class="card-art"><img src="${coverUrl(firstPlaylistTrack(playlist))}" alt="" loading="lazy"><button class="card-play" type="button" aria-label="Play playlist" data-playlist-play>${icons.play_pause_morph}</button></div><div class="card-copy"><div class="card-title">${esc(playlist.name)}</div><div class="card-subtitle">${esc(playlistSummary(playlist))}</div></div><div class="playlist-card-actions"><button data-playlist-rename="${esc(playlist.id)}" type="button">Rename</button><button data-playlist-export="${esc(playlist.id)}" type="button">Export M3U</button><button data-playlist-delete="${esc(playlist.id)}" type="button">Delete</button></div></article>`).join('');
+  } else if (showGroups) {
+    items = state.libraryPage.groups;
+    html = items.map(group => `<article tabindex="0" class="grid-card group-card" data-group-type="${type}" data-group-key="${esc(group.key)}" data-group-name="${esc(group.name)}" aria-label="${esc(group.name)}"><div class="card-art"><img src="${coverUrl(group.artworkTrack)}" alt="" loading="lazy"><button class="card-play" type="button" aria-label="Play ${esc(group.name)}" data-play-btn>${icons.play_pause_morph}</button></div><div class="card-copy"><div class="card-title">${esc(group.name)}</div><div class="card-subtitle">${esc(groupSummary(group))}</div></div><div class="card-meta">${group.trackCount} songs</div><div class="card-duration">${fmt(group.duration)}</div></article>`).join('');
+  } else {
+    items = tracks; html = items.map(track => trackCard(track, playlist)).join('');
   }
-  const playlist = activePlaylist();
-  const visible = tracks.slice(0, state.gridLimit);
-  el.trackGrid.innerHTML = visible.map(track => trackCard(track, playlist)).join("") + (tracks.length > visible.length ? `<button class="load-more" type="button" data-load-more>Show ${Math.min(state.gridPageSize, tracks.length - visible.length)} more of ${tracks.length}</button>` : "");
+  el.trackGrid.innerHTML = html + pagination(collection ? items.length : state.libraryPage.total) || '<div class="empty-grid-message">No matching items. Adjust filters or add music.</div>';
+  highlights();
 }
-
-function renderPlaylistCollection() {
-  el.trackGrid.classList.remove("is-list");
-  el.listHeaders?.classList.add("is-hidden");
-  if (!state.playlists.length) { el.trackGrid.innerHTML = `<div class="empty-grid-message">No playlists yet. Click <strong>+</strong> in the sidebar to create one.</div>`; return; }
-  el.trackGrid.innerHTML = state.playlists.map(playlist => {
-    const first = firstPlaylistTrack(playlist); const summary = playlistSummary(playlist);
-    return `<div class="grid-card group-card" data-playlist-card-id="${esc(playlist.id)}"><div class="card-art"><img src="${coverUrl(first)}" alt="" loading="lazy" onerror="this.onerror=null;this.src='${DEFAULT_COVER}'"><div class="card-play" data-playlist-play="true">${icons.play_pause_morph}</div></div><div class="card-copy"><div class="card-title">${esc(playlist.name)}</div><div class="card-subtitle">${esc(summary)}</div></div><div class="playlist-card-actions"><button class="card-glass-action" data-playlist-rename="${esc(playlist.id)}" type="button">Rename</button><button class="card-glass-action danger" data-playlist-delete="${esc(playlist.id)}" type="button">Delete</button></div><div class="card-meta">Playlist</div><div class="card-duration">${esc(summary)}</div></div>`;
-  }).join("");
-}
-
-function renderGroups(groupType) {
-  const groups = groupTracks(groupType);
-  if (!groups.length) { el.trackGrid.innerHTML = `<div class="empty-grid-message">No ${groupType === "album" ? "albums" : "artists"} found.</div>`; return; }
-  el.trackGrid.innerHTML = groups.map(group => {
-    const meta = group.type === "album" ? group.artists.slice(0, 3).join(", ") : group.albums.slice(0, 3).join(", ");
-    return `<div class="grid-card group-card" data-group-type="${group.type}" data-group-key="${esc(group.key)}"><div class="card-art"><img src="${coverUrl(group.artworkTrack)}" alt="" loading="lazy" onerror="this.onerror=null;this.src='${DEFAULT_COVER}'"><div class="card-play" data-play-btn="true">${icons.play_pause_morph}</div></div><div class="card-copy"><div class="card-title">${esc(group.name)}</div><div class="card-subtitle">${esc(groupSummary(group))}</div></div><div class="card-meta">${esc(meta || groupSummary(group))}</div><div class="card-duration">${group.tracks.length} ${group.tracks.length === 1 ? "song" : "songs"}</div></div>`;
-  }).join("");
-}
-
 function trackCard(track, playlist) {
-  const current = track.id === state.currentTrackId;
-  const playing = current && !el.audio.paused;
-  const selected = track.id === state.selectedTrackId;
-  const artist = track.artist || "Unknown Artist";
-  const album = track.album || "Unknown Album";
-  const favorite = isFavorite(track.id);
-  return `<div class="grid-card ${current ? "is-active" : ""} ${selected ? "is-selected" : ""} ${playing ? "is-playing" : ""}" data-track-id="${esc(track.id)}"><div class="card-art"><img src="${coverUrl(track)}" alt="" loading="lazy" onerror="this.onerror=null;this.src='${DEFAULT_COVER}'"><div class="card-play" data-play-btn="true">${icons.play_pause_morph}</div></div><div class="track-card-actions"><button class="track-mini-action favorite-action ${favorite ? "is-favorite" : ""}" data-track-favorite="${esc(track.id)}" title="${favorite ? "Remove from favorites" : "Add to favorites"}" aria-label="${favorite ? "Remove from favorites" : "Add to favorites"}" type="button">♥</button><button class="track-mini-action" data-track-playlist="${esc(track.id)}" title="Add or remove from playlists" aria-label="Add or remove from playlists" type="button">${icons.plus}</button>${playlist ? `<button class="track-mini-action danger" data-track-remove-playlist="${esc(track.id)}" title="Remove from this playlist" aria-label="Remove from this playlist" type="button">${icons.x}</button>` : ""}</div><div class="card-copy"><div class="card-title">${esc(trackTitle(track))}</div><div class="card-subtitle"><span class="nav-link" data-group-type="artist" data-group-key="${esc(makeGroupKey("artist", artist))}">${esc(artist)}</span></div></div><div class="card-meta"><span class="nav-link" data-group-type="album" data-group-key="${esc(makeGroupKey("album", album))}">${esc(album)}</span></div><div class="card-duration">${fmt(track.duration)}</div></div>`;
+  const favorite = isFavorite(track.id), title = trackTitle(track), artist = track.artist || 'Unknown Artist', album = track.album || 'Unknown Album';
+  return `<article tabindex="0" class="grid-card" data-track-id="${esc(track.id)}" aria-label="${esc(title)}, ${esc(artist)}"><div class="card-art"><img src="${coverUrl(track)}" alt="" loading="lazy"><button class="card-play" type="button" aria-label="Play ${esc(title)}" data-play-btn>${icons.play_pause_morph}</button></div><div class="track-card-actions"><button class="track-mini-action ${favorite ? 'is-favorite' : ''}" data-track-favorite="${esc(track.id)}" aria-pressed="${favorite}" aria-label="Favorite ${esc(title)}">♥</button><button class="track-mini-action" data-track-playlist="${esc(track.id)}" aria-label="Choose playlists">${icons.plus}</button><button class="track-mini-action" data-track-details="${esc(track.id)}" aria-label="Track information">ⓘ</button>${playlist ? `<button class="track-mini-action" data-track-remove-playlist="${esc(track.id)}" aria-label="Remove from playlist">${icons.x}</button><button class="track-mini-action" data-playlist-move="${esc(track.id)}" data-direction="-1" aria-label="Move up">↑</button><button class="track-mini-action" data-playlist-move="${esc(track.id)}" data-direction="1" aria-label="Move down">↓</button>` : ''}</div><div class="card-copy"><div class="card-title">${esc(title)}</div><div class="card-subtitle"><button class="nav-link" type="button" data-group-type="artist" data-group-key="${esc(makeGroupKey('artist', artist))}">${esc(artist)}</button></div></div><div class="card-meta"><button class="nav-link" type="button" data-group-type="album" data-group-key="${esc(albumKey(track))}">${esc(album)}</button></div><div class="card-duration">${track.available === false ? 'File missing · ' : ''}${fmt(track.duration)}</div></article>`;
 }

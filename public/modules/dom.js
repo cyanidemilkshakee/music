@@ -65,8 +65,6 @@ export const el = {
 
   // Volume
   muteBtn:       document.querySelector("#muteBtn"),
-  volScrubberBg: document.querySelector("#volScrubberBg"),
-  volProgress:   document.querySelector("#volProgress"),
 
   // Queue Panel
   queuePanel:       document.querySelector("#queuePanel"),
