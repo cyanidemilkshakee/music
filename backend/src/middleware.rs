@@ -38,9 +38,14 @@ pub async fn request_id_middleware(mut req: Request, next: Next) -> Response {
     res
 }
 
-pub async fn api_response_middleware(req: Request, next: Next) -> Response {
+pub async fn api_response_middleware(
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
     use axum::response::IntoResponse;
     let api = req.uri().path().starts_with("/api/");
+    let path = req.uri().path().to_owned();
     let response = next.run(req).await;
     if api
         && response.status() != axum::http::StatusCode::RANGE_NOT_SATISFIABLE
@@ -61,11 +66,89 @@ pub async fn api_response_middleware(req: Request, next: Next) -> Response {
         }
         .into_response();
     }
-    response
+    let decorate = response.status().is_success()
+        && response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .is_some_and(|v| v.to_str().unwrap_or("").contains("application/json"))
+        && (path == "/api/state"
+            || path == "/api/recent"
+            || path.starts_with("/api/library/tracks")
+            || path.starts_with("/api/tracks/")
+            || path.starts_with("/api/decode/"));
+    if !decorate {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, 128 * 1024 * 1024).await else {
+        return crate::error::AppError::bad_request("Metadata response exceeded its limit.")
+            .into_response();
+    };
+    if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+        crate::security::decorate_media(&mut value, &state.session_token);
+        if let Ok(body) = serde_json::to_vec(&value) {
+            parts.headers.remove(header::CONTENT_LENGTH);
+            return Response::from_parts(parts, axum::body::Body::from(body));
+        }
+    }
+    Response::from_parts(parts, axum::body::Body::from(bytes))
+}
+
+pub async fn request_read_deadline(
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    use axum::response::IntoResponse;
+    let (parts, body) = req.into_parts();
+    let timeout = std::time::Duration::from_millis(state.config.request_read_timeout_ms);
+    let permit = match tokio::time::timeout(timeout, state.request_bodies.acquire()).await {
+        Ok(Ok(permit)) => permit,
+        _ => {
+            return crate::error::AppError::Http {
+                status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                message: "Server request capacity is busy. Try again.".into(),
+                detail: None,
+            }
+            .into_response()
+        }
+    };
+    let bytes = match tokio::time::timeout(
+        timeout,
+        axum::body::to_bytes(body, state.config.json_limit_bytes),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => {
+            return crate::error::AppError::Http {
+                status: axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                message: "Request body exceeds JSON_LIMIT.".into(),
+                detail: None,
+            }
+            .into_response()
+        }
+        Err(_) => {
+            return crate::error::AppError::Http {
+                status: axum::http::StatusCode::REQUEST_TIMEOUT,
+                message: "Request body took too long.".into(),
+                detail: None,
+            }
+            .into_response()
+        }
+    };
+    drop(permit);
+    next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+        .await
 }
 
 pub async fn security_headers_middleware(req: Request, next: Next) -> Response {
+    let private = req.uri().path().starts_with("/api/") || req.uri().path().starts_with("/metrics");
     let mut res = next.run(req).await;
+    if private {
+        res.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
 
     res.headers_mut().insert(
         header::X_CONTENT_TYPE_OPTIONS,
@@ -147,21 +230,39 @@ pub async fn local_access_middleware(
             return rejected("Cross-origin requests are not allowed.");
         }
     }
-    if req
-        .headers()
-        .get("sec-fetch-site")
-        .is_some_and(|v| v == "cross-site")
+    let public_navigation = req.method() == Method::GET
+        && req.uri().path() == "/"
+        && req
+            .headers()
+            .get("sec-fetch-mode")
+            .is_some_and(|v| v == "navigate")
+        && req
+            .headers()
+            .get("sec-fetch-dest")
+            .is_some_and(|v| v == "document");
+    if !public_navigation
+        && req
+            .headers()
+            .get("sec-fetch-site")
+            .is_some_and(|v| v == "cross-site")
     {
         return rejected("Cross-site requests are not allowed.");
     }
-    if !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS)
-        && req
-            .headers()
-            .get("x-local-amp-token")
-            .and_then(|v| v.to_str().ok())
-            != Some(state.session_token.as_str())
-    {
-        return rejected("A valid local session token is required. Reload Local Amp.");
+    let protected =
+        req.uri().path().starts_with("/api/") || req.uri().path().starts_with("/metrics");
+    let public_identity =
+        req.uri().path() == "/api/identity" && matches!(*req.method(), Method::GET | Method::HEAD);
+    let authenticated = req
+        .headers()
+        .get("x-local-amp-token")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|value| crate::security::token_matches(&state.session_token, value));
+    let resource = matches!(*req.method(), Method::GET | Method::HEAD)
+        && req.uri().path_and_query().is_some_and(|uri| {
+            crate::security::capability_matches(&state.session_token, uri.as_str())
+        });
+    if protected && !public_identity && !authenticated && !resource {
+        return rejected("Open Local Amp using its launcher to authorize this browser session.");
     }
     next.run(req).await
 }

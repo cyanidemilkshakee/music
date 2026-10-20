@@ -2,6 +2,7 @@ use crate::{
     config::Config,
     db::{self, Track},
     error::AppError,
+    path_policy,
     services::ffmpeg::FfmpegService,
 };
 use futures_util::{stream, StreamExt};
@@ -9,10 +10,9 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::{
     collections::{HashMap, HashSet},
-    ffi::OsStr,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -75,18 +75,60 @@ fn norm(path: &str) -> String {
         path.to_owned()
     }
 }
-async fn fingerprint(path: &Path) -> Result<String, AppError> {
-    let mut file = fs::File::open(path).await?;
-    let mut hash = sha1_smol::Sha1::new();
-    let mut buffer = vec![0; 64 * 1024];
-    loop {
-        let count = file.read(&mut buffer).await?;
-        if count == 0 {
-            break;
+async fn fingerprint(
+    path: &Path,
+    cancel: &CancellationToken,
+    budget: &AtomicU64,
+    maximum: u64,
+    file_maximum: u64,
+    timeout_ms: u64,
+) -> Result<String, AppError> {
+    let work = async {
+        let path = path_policy::validate_audio_path(path).await?;
+        let mut file = path_policy::open_local_file(&path).await?;
+        let before = file.metadata().await?;
+        let size = before.len();
+        if size > file_maximum
+            || budget
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+                    used.checked_add(size).filter(|total| *total <= maximum)
+                })
+                .is_err()
+        {
+            return Err(AppError::bad_request(
+                "Audio file or aggregate fingerprint-byte limit exceeded.",
+            ));
         }
-        hash.update(&buffer[..count]);
+        let mut hash = sha1_smol::Sha1::new();
+        let mut buffer = vec![0; 64 * 1024];
+        let mut read = 0u64;
+        loop {
+            let count = file.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            read += count as u64;
+            if read > size {
+                return Err(AppError::bad_request(
+                    "Audio changed while fingerprinting; rescan the folder.",
+                ));
+            }
+            hash.update(&buffer[..count]);
+        }
+        let after = file.metadata().await?;
+        if read != size || after.len() != size || before.modified().ok() != after.modified().ok() {
+            return Err(AppError::bad_request(
+                "Audio changed while fingerprinting; rescan the folder.",
+            ));
+        }
+        Ok(hash.digest().to_string())
+    };
+    tokio::select! {
+        _ = cancel.cancelled() => Err(AppError::bad_request("Scan canceled.")),
+        result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work) => {
+            result.map_err(|_| AppError::bad_request("Audio fingerprint exceeded its time budget."))?
+        }
     }
-    Ok(hash.digest().to_string())
 }
 fn first_tag<'a>(tags: &'a HashMap<String, String>, keys: &[&str], fallback: &'a str) -> String {
     for k in keys {
@@ -301,21 +343,8 @@ impl ScannerService {
         let _ = scan.tx.send(event);
         Ok(())
     }
-    fn is_audio_ext(path: &Path) -> bool {
-        path.extension().and_then(OsStr::to_str).is_some_and(|e| {
-            [
-                "aac", "aif", "aiff", "alac", "flac", "m4a", "mp3", "ogg", "opus", "wav", "wma",
-            ]
-            .contains(&e.to_lowercase().as_str())
-        })
-    }
     pub async fn start_scan(&self, directory: PathBuf) -> Result<String, AppError> {
-        let resolved = fs::canonicalize(&directory)
-            .await
-            .map_err(|_| AppError::bad_request("Music folder could not be opened."))?;
-        if !fs::metadata(&resolved).await?.is_dir() {
-            return Err(AppError::bad_request("Path is not a directory."));
-        }
+        let resolved = path_policy::validate_directory(&directory).await?;
         let mut active = self.active_scan.lock().await;
         if active
             .as_ref()
@@ -350,6 +379,7 @@ impl ScannerService {
             let result = tokio::select! {
                 result=scanner.scan(&scan,resolved)=>result,
                 _=scan.cancel.cancelled()=>Err(AppError::bad_request("Scan canceled. Completed imports were kept; rescan to continue.")),
+                _=tokio::time::sleep(std::time::Duration::from_millis(scanner.config.scan_timeout_ms))=>Err(AppError::bad_request("Scan exceeded its time budget. Completed imports were kept; scan smaller folders.")),
             };
             let terminal = match result {
                 Ok(result) => ScanEvent::Complete(result),
@@ -383,7 +413,13 @@ impl ScannerService {
         let mut known = HashMap::new();
         let mut missing_fingerprints: HashMap<String, Vec<Track>> = HashMap::new();
         for (track, hash) in inventory {
-            if fs::metadata(&track.path).await.is_err() {
+            let available = match path_policy::validate_local_path(Path::new(&track.path)).await {
+                Ok(path) => fs::symlink_metadata(path)
+                    .await
+                    .is_ok_and(|meta| meta.is_file()),
+                Err(_) => false,
+            };
+            if !available {
                 if let Some(hash) = &hash {
                     missing_fingerprints
                         .entry(hash.clone())
@@ -395,8 +431,11 @@ impl ScannerService {
         }
         let known = Arc::new(known);
         let missing_fingerprints = Arc::new(missing_fingerprints);
+        let root = resolved.clone();
         let mut dirs = vec![resolved];
         let mut visited = HashSet::new();
+        let mut directory_count = 1usize;
+        let mut entry_count = 0usize;
         let mut files = Vec::new();
         let mut failures = Vec::new();
         let mut failure_count = 0;
@@ -408,7 +447,7 @@ impl ScannerService {
             }
         };
         'walk: while let Some(path) = dirs.pop() {
-            let real = match fs::canonicalize(&path).await {
+            let real = match path_policy::validate_directory(&path).await {
                 Ok(p) => p,
                 Err(e) => {
                     complete_walk = false;
@@ -416,6 +455,14 @@ impl ScannerService {
                     continue;
                 }
             };
+            if !path_policy::is_within(&real, &root) {
+                complete_walk = false;
+                report(
+                    path.to_string_lossy().into(),
+                    "Directory escapes the approved music folder.".into(),
+                );
+                continue;
+            }
             if !visited.insert(norm(&real.to_string_lossy())) {
                 continue;
             }
@@ -437,6 +484,15 @@ impl ScannerService {
                         break;
                     }
                 };
+                entry_count += 1;
+                if entry_count > self.config.max_scan_entries.get() {
+                    complete_walk = false;
+                    report(
+                        real.to_string_lossy().into(),
+                        "Scan directory-entry limit reached; scan smaller folders.".into(),
+                    );
+                    break 'walk;
+                }
                 let kind = match entry.file_type().await {
                     Ok(t) => t,
                     Err(e) => {
@@ -446,11 +502,21 @@ impl ScannerService {
                     }
                 };
                 if kind.is_symlink() {
+                    complete_walk = false;
                     continue;
                 }
                 if kind.is_dir() {
+                    if directory_count >= self.config.max_scan_directories.get() {
+                        complete_walk = false;
+                        report(
+                            real.to_string_lossy().into(),
+                            "Scan directory limit reached; scan smaller folders.".into(),
+                        );
+                        break 'walk;
+                    }
+                    directory_count += 1;
                     dirs.push(entry.path());
-                } else if kind.is_file() && Self::is_audio_ext(&entry.path()) {
+                } else if kind.is_file() && path_policy::is_audio_extension(&entry.path()) {
                     if files.len() >= self.config.max_scan_files.get() {
                         complete_walk = false;
                         report(
@@ -470,11 +536,16 @@ impl ScannerService {
         }
         let total = files.len();
         let ffmpeg = self.ffmpeg.clone();
+        let budget = Arc::new(AtomicU64::new(0));
         let mut probes = stream::iter(files)
             .map(|path| {
                 let known = known.clone();
                 let missing = missing_fingerprints.clone();
                 let ffmpeg = ffmpeg.clone();
+                let budget = budget.clone();
+                let root = root.clone();
+                let cancel = scan.cancel.clone();
+                let config = self.config.clone();
                 async move {
                     let result = async {
                         if path.to_str().is_none() {
@@ -482,7 +553,18 @@ impl ScannerService {
                                 "This filename is not valid Unicode. Rename it before importing.",
                             ));
                         }
-                        let meta = fs::metadata(&path).await?;
+                        let validated = path_policy::validate_audio_path(&path).await?;
+                        if !path_policy::is_within(&validated, &root) {
+                            return Err(AppError::bad_request(
+                                "Audio escapes the approved music folder.",
+                            ));
+                        }
+                        let meta = fs::symlink_metadata(&validated).await?;
+                        if meta.len() > config.max_scan_file_bytes {
+                            return Err(AppError::bad_request(
+                                "Audio exceeds the scan file-size limit.",
+                            ));
+                        }
                         let modified = meta
                             .modified()
                             .ok()
@@ -496,8 +578,23 @@ impl ScannerService {
                                 return Ok::<_, AppError>((track.clone(), hash.clone(), true));
                             }
                         }
-                        let hash = fingerprint(&path).await?;
-                        let probe = ffmpeg.probe_track_metadata(&path).await?;
+                        let hash = fingerprint(
+                            &validated,
+                            &cancel,
+                            &budget,
+                            config.max_scan_hash_bytes,
+                            config.max_scan_file_bytes,
+                            config.fingerprint_timeout_ms,
+                        )
+                        .await?;
+                        let probe = ffmpeg.probe_track_metadata(&validated).await?;
+                        if !probe["streams"].as_array().is_some_and(|streams| {
+                            streams.iter().any(|stream| stream["codec_type"] == "audio")
+                        }) {
+                            return Err(AppError::bad_request(
+                                "File has no supported audio stream.",
+                            ));
+                        }
                         let mut track = parse_track(&path, meta, probe);
                         if let Some((old, _)) = old {
                             track.id = old.id.clone();
@@ -612,7 +709,7 @@ impl ScannerService {
         })
         .await??
         .ok_or_else(|| AppError::not_found("Track not found."))?;
-        let path = PathBuf::from(&track.path);
+        let path = path_policy::validate_audio_path(Path::new(&track.path)).await?;
         let mut next = parse_track(
             &path,
             fs::metadata(&path).await?,
@@ -620,7 +717,15 @@ impl ScannerService {
         );
         next.id = track.id;
         next.imported_at = track.imported_at;
-        let hash = fingerprint(&path).await?;
+        let hash = fingerprint(
+            &path,
+            &CancellationToken::new(),
+            &AtomicU64::new(0),
+            self.config.max_scan_hash_bytes,
+            self.config.max_scan_file_bytes,
+            self.config.fingerprint_timeout_ms,
+        )
+        .await?;
         let pool = self.pool.clone();
         let saved = next.clone();
         spawn_blocking(move || {
@@ -637,6 +742,38 @@ impl ScannerService {
 mod metadata_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[tokio::test]
+    async fn fingerprint_work_is_bounded_and_cancellable() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bounded.wav");
+        let mut content = vec![0; 128];
+        content[..4].copy_from_slice(b"RIFF");
+        content[8..12].copy_from_slice(b"WAVE");
+        fs::write(&path, content).await.unwrap();
+        let cancel = CancellationToken::new();
+        let used = AtomicU64::new(0);
+        assert!(fingerprint(&path, &cancel, &used, 64, 256, 1000)
+            .await
+            .is_err());
+        assert_eq!(used.load(Ordering::SeqCst), 0);
+        assert!(fingerprint(&path, &cancel, &used, 256, 64, 1000)
+            .await
+            .is_err());
+        assert!(fingerprint(&path, &cancel, &used, 256, 256, 1000)
+            .await
+            .is_ok());
+        assert_eq!(used.load(Ordering::SeqCst), 128);
+        assert!(fingerprint(&path, &cancel, &used, 200, 256, 1000)
+            .await
+            .is_err());
+        cancel.cancel();
+        assert!(
+            fingerprint(&path, &cancel, &AtomicU64::new(0), 256, 256, 1000)
+                .await
+                .is_err()
+        );
+    }
     #[test]
     fn numeric_metadata_and_attached_picture_are_parsed_deliberately() {
         let file = tempfile::NamedTempFile::new().unwrap();

@@ -94,17 +94,16 @@ impl IntoResponse for AppError {
                 stderr,
             } => {
                 tracing::warn!(%message, ?exit_code, %stderr, "Media operation failed");
+                (StatusCode::UNPROCESSABLE_ENTITY, message, None)
+            }
+            AppError::Io(ref e) => {
+                tracing::warn!(error=%e,"Local filesystem operation failed");
                 (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    message,
-                    Some(stderr.chars().take(2000).collect()),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Local filesystem operation failed.".to_string(),
+                    None,
                 )
             }
-            AppError::Io(ref e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "I/O Error".to_string(),
-                Some(e.to_string()),
-            ),
             // For all other errors, we return a 500 and log the error.
             _ => {
                 error!(error = ?self, "Internal server error");

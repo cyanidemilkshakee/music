@@ -2,6 +2,7 @@ use super::{json::ApiJson, AppState};
 use crate::{
     db::{self, Track},
     error::AppError,
+    services::ffmpeg::FfmpegService,
 };
 use axum::{
     body::Body,
@@ -12,9 +13,13 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 use tokio::{
-    fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
+    sync::OwnedSemaphorePermit,
     task::spawn_blocking,
 };
 use tokio_util::io::ReaderStream;
@@ -37,6 +42,8 @@ async fn get_track(state: &AppState, id: String) -> Result<Track, AppError> {
     })
     .await??
     .ok_or_else(|| AppError::not_found("Track not found."))?;
+    let path = crate::path_policy::validate_audio_path(std::path::Path::new(&track.path)).await?;
+    track.path = path.to_string_lossy().into_owned();
     let meta = tokio::fs::metadata(&track.path).await.map_err(|_| {
         AppError::not_found(
             "Music file is missing or inaccessible. Reconnect the folder and rescan.",
@@ -116,6 +123,7 @@ async fn send_original(
 ) -> Result<Response, AppError> {
     let track = get_track(&state, id).await?;
     serve_file(
+        &state.ffmpeg,
         std::path::Path::new(&track.path),
         original_mime(&track),
         req,
@@ -134,6 +142,7 @@ async fn send_audio(
     }
     let path = state.ffmpeg.ensure_decoded(&track, &query.format).await?;
     serve_file(
+        &state.ffmpeg,
         &path,
         if query.format == "mp3" {
             "audio/mpeg"
@@ -154,17 +163,22 @@ async fn send_artwork(
         return Err(AppError::not_found("Artwork not found."));
     }
     let path = state.ffmpeg.ensure_decoded(&track, "jpg").await?;
-    serve_file(&path, "image/jpeg", req).await
+    serve_file(&state.ffmpeg, &path, "image/jpeg", req).await
 }
 async fn serve_file(
+    media: &FfmpegService,
     path: &std::path::Path,
     mime: &'static str,
     req: Request,
 ) -> Result<Response, AppError> {
+    // The permit covers open handles and the complete streaming response, not
+    // just the handler future. HEAD/304/416 release it before returning.
+    let permit = media.stream_permit().await?;
     // Open first; metadata and bytes belong to the same file even during eviction.
-    let mut file = File::open(path)
+    let mut file = crate::path_policy::open_local_file(path)
         .await
         .map_err(|_| AppError::not_found("Media file is not ready or no longer available."))?;
+    crate::path_policy::validate_local_path(path).await?;
     let meta = file.metadata().await?;
     let size = meta.len();
     if !meta.is_file() || size == 0 {
@@ -182,7 +196,7 @@ async fn serve_file(
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache"),
+        HeaderValue::from_static("private, no-store"),
     );
     headers.insert(
         header::ETAG,
@@ -240,9 +254,51 @@ async fn serve_file(
     Ok((
         status,
         headers,
-        Body::from_stream(ReaderStream::new(file.take(length))),
+        Body::from_stream(PermitStream::new(
+            ReaderStream::new(file.take(length)),
+            permit,
+        )),
     )
         .into_response())
+}
+
+struct PermitStream<S> {
+    stream: S,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+impl<S> PermitStream<S> {
+    fn new(stream: S, permit: OwnedSemaphorePermit) -> Self {
+        metrics::gauge!("media_active_streams").increment(1.0);
+        Self {
+            stream,
+            permit: Some(permit),
+        }
+    }
+
+    fn release(&mut self) {
+        if self.permit.take().is_some() {
+            metrics::gauge!("media_active_streams").decrement(1.0);
+        }
+    }
+}
+
+impl<S: futures_util::Stream + Unpin> futures_util::Stream for PermitStream<S> {
+    type Item = S::Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let result = Pin::new(&mut self.stream).poll_next(cx);
+        if matches!(result, Poll::Ready(None)) {
+            self.release();
+        }
+        result
+    }
+}
+
+impl<S> Drop for PermitStream<S> {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 fn parse_range(range_str: &str, size: u64) -> Result<std::ops::RangeInclusive<u64>, AppError> {
     if size == 0 || !range_str.starts_with("bytes=") {
@@ -371,5 +427,26 @@ mod tests {
             Some(&HeaderValue::from_static("\"xyz\"")),
             "\"abc\""
         ));
+    }
+
+    #[tokio::test]
+    async fn stream_capacity_remains_reserved_until_eof_or_disconnect() {
+        use futures_util::StreamExt;
+        let capacity = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = capacity.clone().acquire_owned().await.unwrap();
+        let mut body = PermitStream::new(futures_util::stream::iter([1_u8, 2]), permit);
+        assert!(capacity.clone().try_acquire_owned().is_err());
+        assert_eq!(body.next().await, Some(1));
+        assert!(capacity.clone().try_acquire_owned().is_err());
+        assert_eq!(body.next().await, Some(2));
+        assert!(capacity.clone().try_acquire_owned().is_err());
+        assert_eq!(body.next().await, None);
+        assert!(capacity.clone().try_acquire_owned().is_ok());
+
+        let permit = capacity.clone().acquire_owned().await.unwrap();
+        let body = PermitStream::new(futures_util::stream::pending::<u8>(), permit);
+        assert!(capacity.clone().try_acquire_owned().is_err());
+        drop(body);
+        assert!(capacity.try_acquire_owned().is_ok());
     }
 }

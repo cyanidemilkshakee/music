@@ -1,5 +1,5 @@
 use super::{json::ApiJson, AppState};
-use crate::{db, error::AppError};
+use crate::{db, error::AppError, path_policy};
 use axum::{
     extract::{Path, Query, State},
     routing::{get, post, put},
@@ -29,7 +29,7 @@ pub fn router() -> Router<AppState> {
 }
 async fn session(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(
-        serde_json::json!({"app":"LocalAmp","version":env!("CARGO_PKG_VERSION"),"processId":std::process::id(),"token":state.session_token.as_str()}),
+        serde_json::json!({"app":"LocalAmp","version":env!("CARGO_PKG_VERSION"),"processId":std::process::id(),"token":state.session_token.as_str(),"metricsUrl":crate::security::signed_url(&state.session_token,"/metrics")}),
     )
 }
 async fn shutdown(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -197,14 +197,24 @@ async fn restore(
 ) -> Result<Json<serde_json::Value>, AppError> {
     if payload.version != 1
         || payload.playlists.len() > 1000
-        || payload.tracks.len() > 1_000_000
-        || payload.sources.len() > 10000
+        || payload.tracks.len() > 10_000
+        || payload.sources.len() > 1000
     {
         return Err(AppError::bad_request(
-            "Unsupported backup or too many playlists.",
+            "Unsupported backup or restore limit exceeded (1000 playlists, 10000 tracks, 1000 sources).",
         ));
     }
     validate_ids(&payload.favorites)?;
+    validate_ids(&payload.recent)?;
+    let references = payload.playlists.iter().try_fold(
+        payload.favorites.len() + payload.recent.len(),
+        |total, playlist| total.checked_add(playlist.track_ids.len()),
+    );
+    if references.is_none_or(|total| total > 100_000) {
+        return Err(AppError::bad_request(
+            "Backup exceeds 100000 total track references.",
+        ));
+    }
     for playlist in &payload.playlists {
         validate_ids(&playlist.track_ids)?;
         if playlist.name.trim().is_empty()
@@ -215,22 +225,122 @@ async fn restore(
             return Err(AppError::bad_request("Invalid playlist in backup."));
         }
     }
+    // Reject every untrusted namespace before any filesystem inspection. A
+    // source written inside this backup is never permission to access a root.
+    for track in &payload.tracks {
+        path_policy::validate_local_namespace(std::path::Path::new(&track.path))?;
+        if track.id.is_empty()
+            || track.id.len() > 200
+            || !track.duration.is_finite()
+            || track.duration < 0.0
+            || !track.bit_rate.is_finite()
+            || track.bit_rate < 0.0
+            || !path_policy::is_audio_extension(std::path::Path::new(&track.path))
+        {
+            return Err(AppError::bad_request("Invalid audio track in backup."));
+        }
+    }
+    for source in &payload.sources {
+        path_policy::validate_local_namespace(std::path::Path::new(&source.path))?;
+    }
+    let pool = state.pool.clone();
+    let (roots, existing) = spawn_blocking(move || {
+        let conn = pool.get()?;
+        let roots = db::get_library_sources(&conn)?;
+        let mut statement = conn.prepare("SELECT path FROM tracks")?;
+        let existing = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok::<_, AppError>((roots, existing))
+    })
+    .await??;
+    let existing: std::collections::HashMap<_, _> = existing
+        .into_iter()
+        .map(|path| (path_policy::path_key(std::path::Path::new(&path)), path))
+        .collect();
+    // Filesystem work and FFprobe run before opening the write transaction;
+    // bounded time/count prevents a backup from locking the database indefinitely.
+    let (payload, availability) = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        let mut approved = Vec::new();
+        for root in roots {
+            if let Ok(root) = path_policy::validate_local_path(std::path::Path::new(&root.path)).await {
+                approved.push(root);
+            }
+        }
+        let mut payload = payload;
+        let mut availability = Vec::with_capacity(payload.tracks.len());
+        let mut seen_ids = std::collections::HashSet::new();
+        let mut seen_paths = std::collections::HashSet::new();
+        for track in &mut payload.tracks {
+            let original = std::path::Path::new(&track.path);
+            if !approved.iter().any(|root| path_policy::is_within(original, root))
+                && !existing.contains_key(&path_policy::path_key(original))
+            {
+                return Err(AppError::bad_request("Import/scan the music folder first, then restore this backup."));
+            }
+            let resolved = path_policy::validate_local_path(original).await?;
+            if !approved.iter().any(|root| path_policy::is_within(&resolved, root))
+                && !existing.contains_key(&path_policy::path_key(&resolved))
+            {
+                return Err(AppError::bad_request("Backup track escapes its approved music folder."));
+            }
+            if !seen_ids.insert(track.id.clone()) || !seen_paths.insert(path_policy::path_key(&resolved)) {
+                return Err(AppError::bad_request("Backup contains duplicate tracks."));
+            }
+            let available = match tokio::fs::symlink_metadata(&resolved).await {
+                Ok(meta) => {
+                    if !meta.is_file() || meta.len() > state.config.max_scan_file_bytes {
+                        return Err(AppError::bad_request("Backup audio is not a regular file or exceeds the file-size limit."));
+                    }
+                    let audio = path_policy::validate_audio_path(&resolved).await?;
+                    let probe = state.ffmpeg.probe_track_metadata(&audio).await?;
+                    if !probe["streams"].as_array().is_some_and(|streams| streams.iter().any(|stream| stream["codec_type"] == "audio")) {
+                        return Err(AppError::bad_request("Backup file has no supported audio stream."));
+                    }
+                    true
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(_) => return Err(AppError::bad_request("Backup audio could not be inspected.")),
+            };
+            // Preserve an existing path spelling so an older ordinary-drive
+            // record and its canonical verbatim alias do not become duplicates.
+            track.path = existing.get(&path_policy::path_key(&resolved))
+                .cloned().unwrap_or_else(|| resolved.to_string_lossy().into_owned());
+            availability.push(available);
+        }
+        for source in &mut payload.sources {
+            let path = std::path::Path::new(&source.path);
+            if !approved.iter().any(|root| path_policy::is_within(path, root)) {
+                return Err(AppError::bad_request("Import/scan the backup's music folders first, then restore."));
+            }
+            let resolved = path_policy::validate_local_path(path).await?;
+            if !approved.iter().any(|root| path_policy::is_within(&resolved, root)) {
+                return Err(AppError::bad_request("Backup source escapes its approved folder."));
+            }
+            match tokio::fs::symlink_metadata(&resolved).await {
+                Ok(meta) if !meta.is_dir() => return Err(AppError::bad_request("Backup source must be a local directory.")),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(AppError::bad_request("Backup source could not be inspected.")),
+            }
+            source.path = resolved.to_string_lossy().into_owned();
+        }
+        Ok::<_, AppError>((payload, availability))
+    }).await.map_err(|_| AppError::bad_request("Backup validation exceeded its time budget; restore a smaller backup."))??;
     let pool = state.pool;
     let value=spawn_blocking(move || {
         let mut conn=pool.get()?;let tx=conn.transaction()?;
         let mut id_map=std::collections::HashMap::new();
-        for mut track in payload.tracks {
-            if !std::path::Path::new(&track.path).is_absolute() || track.id.is_empty() || track.id.len()>200 || track.path.len()>32768 || !track.duration.is_finite() || track.duration<0.0 {return Err(AppError::bad_request("Invalid track in backup."));}
+        for (mut track, available) in payload.tracks.into_iter().zip(availability) {
             let existing:Option<String>=tx.query_row("SELECT id FROM tracks WHERE path=?",[&track.path],|r|r.get(0)).optional()?;
             let old_id=track.id.clone();
             if let Some(id)=existing {track.id=id;}
             else if tx.prepare("SELECT 1 FROM tracks WHERE id=?")?.exists([&track.id])? {track.id=uuid::Uuid::new_v4().to_string();}
             id_map.insert(old_id,track.id.clone());
             db::upsert_tracks(&tx,std::slice::from_ref(&track))?;
-            tx.execute("UPDATE tracks SET available=? WHERE id=?",rusqlite::params![std::path::Path::new(&track.path).is_file(),track.id])?;
+            tx.execute("UPDATE tracks SET available=? WHERE id=?",rusqlite::params![available,track.id])?;
         }
         for source in payload.sources {
-            if !std::path::Path::new(&source.path).is_absolute() || source.path.len()>32768 {return Err(AppError::bad_request("Invalid source in backup."));}
             tx.execute("INSERT INTO library_sources VALUES (?,?,?,?) ON CONFLICT(path) DO NOTHING",rusqlite::params![uuid::Uuid::new_v4().to_string(),source.path,source.added_at,source.last_scanned_at])?;
         }
         // Restore is an atomic merge. Existing playlists and library files survive.

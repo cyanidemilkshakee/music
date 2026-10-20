@@ -49,7 +49,12 @@ async fn delete_source(
 async fn pick_folder(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
     #[cfg(target_os = "windows")]
     {
-        let mut command = tokio::process::Command::new("powershell.exe");
+        let executable = crate::tool_paths::resolve(std::path::Path::new("powershell.exe"))
+            .await?
+            .ok_or(AppError::MediaUnavailable {
+                tool: "Folder picker",
+            })?;
+        let mut command = tokio::process::Command::new(executable);
         command
             .args([
                 "-NoProfile",

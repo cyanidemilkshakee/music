@@ -22,4 +22,5 @@ pub struct AppState {
     pub scanner: Arc<ScannerService>,
     pub session_token: Arc<String>,
     pub shutdown: tokio_util::sync::CancellationToken,
+    pub request_bodies: Arc<tokio::sync::Semaphore>,
 }

@@ -29,14 +29,24 @@ pub struct Config {
     pub stream_concurrency: NonZeroUsize,    // 1..=32
     pub max_scan_files: NonZeroUsize,        // 1..=1_000_000
     pub max_scan_failures: NonZeroUsize,     // 1..=100_000
-    pub json_limit_bytes: usize,             // parsed "2mb" -> bytes
+    pub max_scan_entries: NonZeroUsize,
+    pub max_scan_directories: NonZeroUsize,
+    pub max_scan_hash_bytes: u64,
+    pub max_scan_file_bytes: u64,
+    pub fingerprint_timeout_ms: u64,
+    pub scan_timeout_ms: u64,
+    pub json_limit_bytes: usize, // parsed "2mb" -> bytes
     pub ffmpeg_path: PathBuf,
     pub ffprobe_path: PathBuf,
     pub ffprobe_timeout_ms: u64, // 1_000..=600_000
     pub ffmpeg_timeout_ms: u64,  // 1_000..=3_600_000
     pub data_dir: PathBuf,
     pub cache_max_bytes: u64,
+    pub transcode_max_bytes: u64,
+    pub cache_min_free_bytes: u64,
     pub max_concurrent_requests: usize, // default 512
+    pub max_connections: usize,
+    pub request_read_timeout_ms: u64,
 }
 
 impl Config {
@@ -74,6 +84,18 @@ impl Config {
             Self::parse_nonzero("MAX_SCAN_FILES", 100_000, 1, 1_000_000, &mut errors);
         let max_scan_failures =
             Self::parse_nonzero("MAX_SCAN_FAILURES", 10_000, 1, 100_000, &mut errors);
+        let max_scan_entries =
+            Self::parse_nonzero("MAX_SCAN_ENTRIES", 1_000_000, 1, 10_000_000, &mut errors);
+        let max_scan_directories =
+            Self::parse_nonzero("MAX_SCAN_DIRECTORIES", 100_000, 1, 1_000_000, &mut errors);
+        let max_scan_hash_bytes =
+            Self::parse_u64("MAX_SCAN_HASH_MB", 524_288, 1, 10_485_760, &mut errors) * 1024 * 1024;
+        let max_scan_file_bytes =
+            Self::parse_u64("MAX_SCAN_FILE_MB", 8192, 1, 1_048_576, &mut errors) * 1024 * 1024;
+        let fingerprint_timeout_ms =
+            Self::parse_u64("FINGERPRINT_TIMEOUT_MS", 30_000, 1000, 600_000, &mut errors);
+        let scan_timeout_ms =
+            Self::parse_u64("SCAN_TIMEOUT_MS", 1_800_000, 1000, 86_400_000, &mut errors);
 
         let json_limit_bytes = match std::env::var("JSON_LIMIT") {
             Ok(v) => match v.to_lowercase().as_str() {
@@ -112,9 +134,22 @@ impl Config {
             .unwrap_or_else(default_data_dir);
         let cache_max_bytes =
             Self::parse_u64("CACHE_MAX_MB", 1024, 16, 100_000, &mut errors) * 1024 * 1024;
+        let transcode_max_bytes =
+            (Self::parse_u64("TRANSCODE_MAX_MB", 512, 1, 100_000, &mut errors) * 1024 * 1024)
+                .min(cache_max_bytes);
+        let cache_min_free_bytes =
+            Self::parse_u64("CACHE_MIN_FREE_MB", 256, 0, 100_000, &mut errors) * 1024 * 1024;
 
         let max_concurrent_requests =
             Self::parse_usize("MAX_CONCURRENT_REQUESTS", 512, 1, 10_000, &mut errors);
+        let max_connections = Self::parse_usize("MAX_CONNECTIONS", 128, 1, 2048, &mut errors);
+        let request_read_timeout_ms = Self::parse_u64(
+            "REQUEST_READ_TIMEOUT_MS",
+            30_000,
+            1000,
+            120_000,
+            &mut errors,
+        );
 
         if errors.is_empty() {
             Ok(Self {
@@ -125,6 +160,12 @@ impl Config {
                 stream_concurrency,
                 max_scan_files,
                 max_scan_failures,
+                max_scan_entries,
+                max_scan_directories,
+                max_scan_hash_bytes,
+                max_scan_file_bytes,
+                fingerprint_timeout_ms,
+                scan_timeout_ms,
                 json_limit_bytes,
                 ffmpeg_path,
                 ffprobe_path,
@@ -132,7 +173,11 @@ impl Config {
                 ffmpeg_timeout_ms,
                 data_dir,
                 cache_max_bytes,
+                transcode_max_bytes,
+                cache_min_free_bytes,
                 max_concurrent_requests,
+                max_connections,
+                request_read_timeout_ms,
             })
         } else {
             Err(errors)

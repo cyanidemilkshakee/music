@@ -5,30 +5,80 @@ permissions:
   contents: read
 jobs:
   installer:
-    runs-on: windows-latest
+    runs-on: windows-2022
+    environment: windows-release
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          node-version: 22
+          persist-credentials: false
+      - name: Require a real signing credential
+        shell: pwsh
+        env:
+          LOCAL_AMP_SIGNING_PFX_BASE64: ${{ secrets.LOCAL_AMP_SIGNING_PFX_BASE64 }}
+          LOCAL_AMP_SIGNING_PFX_PASSWORD: ${{ secrets.LOCAL_AMP_SIGNING_PFX_PASSWORD }}
+        run: |
+          if (-not $env:LOCAL_AMP_SIGNING_PFX_BASE64 -or -not $env:LOCAL_AMP_SIGNING_PFX_PASSWORD) {
+            throw 'Configure a trusted signing certificate in the windows-release environment. Unsigned release artifacts are not permitted.'
+          }
+          $taskPfxPath = Join-Path $env:RUNNER_TEMP 'LocalAmp-signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes($taskPfxPath, [Convert]::FromBase64String($env:LOCAL_AMP_SIGNING_PFX_BASE64))
+            $taskPfxPassword = ConvertTo-SecureString $env:LOCAL_AMP_SIGNING_PFX_PASSWORD -AsPlainText -Force
+            $taskImportedCertificates = Import-PfxCertificate -FilePath $taskPfxPath -CertStoreLocation 'Cert:\CurrentUser\My' -Password $taskPfxPassword
+            $taskSigningCertificates = @($taskImportedCertificates | Where-Object { $_.HasPrivateKey })
+            if ($taskSigningCertificates.Count -ne 1) { throw 'A single code-signing certificate with its private key is required.' }
+            $taskCertificate = $taskSigningCertificates[0]
+            "LOCAL_AMP_SIGNING_THUMBPRINT=$($taskCertificate.Thumbprint)" >> $env:GITHUB_ENV
+          } finally {
+            if (Test-Path -LiteralPath $taskPfxPath) { Remove-Item -LiteralPath $taskPfxPath -Force }
+          }
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: 1.97.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.23.3
       - run: npm ci --ignore-scripts
-      - run: choco install ffmpeg innosetup -y --no-progress
+      - run: choco install ffmpeg --version=9.0.2 --source=https://community.chocolatey.org/api/v2/ -y --no-progress
+      - name: Install verified Inno Setup 7.1.0
+        shell: pwsh
+        run: |
+          $taskInnoInstaller = Join-Path $env:RUNNER_TEMP 'innosetup-7.1.0-x64.exe'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe' -OutFile $taskInnoInstaller
+          if ((Get-FileHash -LiteralPath $taskInnoInstaller -Algorithm SHA256).Hash -ne '0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f') { throw 'Inno Setup download checksum mismatch.' }
+          $taskInnoSignature = Get-AuthenticodeSignature -LiteralPath $taskInnoInstaller
+          if ($taskInnoSignature.Status -ne 'Valid' -or $taskInnoSignature.SignerCertificate.Subject -notmatch 'Pyrsys B\.V\.') { throw 'Inno Setup publisher/signature validation failed.' }
+          $taskInstall = Start-Process -FilePath $taskInnoInstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -WindowStyle Hidden -Wait -PassThru
+          if ($taskInstall.ExitCode -ne 0) { throw 'Inno Setup installation failed.' }
       - run: npm run lint
       - run: npm test
       - run: npx playwright install chromium
       - run: npm run test:browser
       - run: npm run build
       - shell: pwsh
-        run: ./scripts/Build-WindowsInstaller.ps1 -SkipBuild
+        run: ./scripts/Test-WindowsLauncher.ps1 -Executable './backend/target/x86_64-pc-windows-msvc/release/backend.exe'
+      - shell: pwsh
+        run: ./scripts/Build-WindowsInstaller.ps1 -SkipBuild -RequireSignature
       - name: Verify install, upgrade and uninstall
         shell: pwsh
-        run: ./scripts/Test-WindowsInstaller.ps1
-      - uses: actions/upload-artifact@v4
+        run: ./scripts/Test-WindowsInstaller.ps1 -RequireSignature
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: LocalAmp-Windows-Installer
-          path: dist/*
-      - uses: actions/upload-artifact@v4
+          path: |
+            dist/LocalAmp-Setup-1.1.0.exe
+            dist/SHA256SUMS.txt
+            dist/THIRD_PARTY_LICENSES.txt
+            dist/RUST_STDLIB_LICENSES.html
+      - name: Remove signing certificate
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:LOCAL_AMP_SIGNING_THUMBPRINT -match '^[A-Fa-f0-9]{40}$') {
+            $taskCertificatePath = Join-Path 'Cert:\CurrentUser\My' $env:LOCAL_AMP_SIGNING_THUMBPRINT
+            if (Test-Path -LiteralPath $taskCertificatePath) { Remove-Item -LiteralPath $taskCertificatePath -DeleteKey }
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure()
         with:
           name: browser-failure-windows

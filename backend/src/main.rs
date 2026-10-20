@@ -14,10 +14,14 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod config;
 mod db;
 mod error;
+mod http_server;
 mod metrics;
 mod middleware;
+pub mod path_policy;
 mod routes;
+mod security;
 mod services;
+mod tool_paths;
 
 use crate::config::Config;
 use crate::routes::AppState;
@@ -41,15 +45,16 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(%error, "Prometheus metrics are unavailable");
     }
 
-    let config_val = Config::from_env().map_err(|errors| {
+    let mut config_val = Config::from_env().map_err(|errors| {
         for error in &errors {
             tracing::error!("Config error: {}", error);
         }
         anyhow::anyhow!("Invalid configuration")
     })?;
 
+    let _instance_lock = security::prepare_data_dir(&mut config_val).await?;
+    tool_paths::prepare(&mut config_val).await?;
     let config = Arc::new(config_val);
-    std::fs::create_dir_all(&config.data_dir)?;
     let db_path = config.data_dir.join("local-amp.db");
 
     let pool = db::pool::build_pool(&db_path)?;
@@ -59,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let ffmpeg = FfmpegService::new(config.clone());
+    ffmpeg.initialize_cache().await?;
     let scanner = Arc::new(ScannerService::new(
         config.clone(),
         ffmpeg.clone(),
@@ -72,8 +78,9 @@ async fn main() -> anyhow::Result<()> {
         pool,
         ffmpeg: ffmpeg.clone(),
         scanner: scanner.clone(),
-        session_token: Arc::new(uuid::Uuid::new_v4().to_string()),
+        session_token: Arc::new(security::new_token()),
         shutdown: shutdown.clone(),
+        request_bodies: Arc::new(tokio::sync::Semaphore::new(8)),
     };
 
     let app = Router::new()
@@ -82,8 +89,14 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api", routes::library::router())
         .nest("/api", routes::management::router())
         .nest("/metrics", metrics::router())
+        .route("/api/identity", axum::routing::get(security::identity))
+        .route("/api/access", axum::routing::post(security::access))
         .fallback(routes::assets::serve)
         .with_state(app_state.clone())
+        .layer(axum_middleware::from_fn_with_state(
+            app_state.clone(),
+            middleware::api_response_middleware,
+        ))
         // Streaming playback and scan progress may legitimately outlive a normal
         // request timeout. The FFmpeg and ffprobe operations enforce their own
         // bounded timeouts, while this layer protects server capacity.
@@ -96,29 +109,40 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::extract::DefaultBodyLimit::max(
             config.json_limit_bytes,
         ))
-        .layer(axum_middleware::from_fn(
-            middleware::api_response_middleware,
+        .layer(axum_middleware::from_fn_with_state(
+            app_state.clone(),
+            middleware::request_read_deadline,
+        ))
+        .layer(axum_middleware::from_fn_with_state(
+            app_state.clone(),
+            middleware::local_access_middleware,
         ))
         .layer(axum_middleware::from_fn(
             middleware::security_headers_middleware,
-        ))
-        .layer(axum_middleware::from_fn_with_state(
-            app_state,
-            middleware::local_access_middleware,
         ))
         .layer(axum_middleware::from_fn(middleware::request_id_middleware));
 
     let addr = std::net::SocketAddr::new(config.host, config.port);
     let listener = TcpListener::bind(addr).await?;
+    security::write_launch_file(&config, &app_state.session_token)?;
     info!("Listening on http://{}", addr);
+    info!("Use the Local Amp launcher to open an authorized browser session.");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            tokio::select! { _ = shutdown_signal() => {}, _ = shutdown.cancelled() => {} }
-            scanner.cancel_active().await;
-            ffmpeg.shutdown();
-        })
-        .await?;
+    let stop = shutdown.clone();
+    let stopping = tokio::spawn(async move {
+        tokio::select! { _ = shutdown_signal() => { stop.cancel(); }, _ = stop.cancelled() => {} }
+        scanner.cancel_active().await;
+        ffmpeg.shutdown();
+    });
+    http_server::serve(
+        listener,
+        app,
+        shutdown,
+        config.max_connections,
+        config.request_read_timeout_ms,
+    )
+    .await?;
+    let _ = stopping.await;
 
     Ok(())
 }

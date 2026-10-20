@@ -63,7 +63,7 @@ pub fn build_pool(db_path: &Path) -> Result<Pool<SqliteConnectionManager>, AppEr
     )?;
     tx.commit()?;
 
-    let foreign_key_check: usize = conn.query_row(
+    let foreign_key_check: i64 = conn.query_row(
         "SELECT count(*) FROM pragma_foreign_key_check()",
         [],
         |row| row.get(0),
