@@ -1,10 +1,11 @@
 import { state } from './state.js';
 import { el } from './dom.js';
-import { api } from './api.js';
+import { api, apiStream } from './api.js';
 import { refreshLibrary } from './library-data.js';
 import { esc } from './utils.js';
 import { trapModalFocus } from './modal-focus.js';
 import { getStorage, setStorage } from './storage.js';
+import { directoryFromFileUri } from './import-payload.js';
 let releaseImportFocus = null, jobId = null, observer = null;
 function status(message, className = '') { el.importStatusSheet.textContent = message; el.importStatusSheet.className = 'import-status ' + className; }
 function busy(value) {
@@ -37,13 +38,7 @@ export async function chooseLibraryFolder() {
 export async function forgetLibrarySource(id) { await api('/api/library/sources/' + encodeURIComponent(id), {method:'DELETE'}); await refreshLibrarySources(); }
 export function directoryFromDrop(event) {
   const uri = (event.dataTransfer?.getData('text/uri-list') || '').split(/\r?\n/).find(line => line && !line.startsWith('#'));
-  try {
-    const url = new URL(uri);
-    if (url.protocol !== 'file:') return '';
-    const path = decodeURIComponent(url.pathname);
-    if (url.hostname && url.hostname !== 'localhost') return '\\\\' + url.hostname + path.replaceAll('/', '\\');
-    return /^\/[A-Za-z]:\//.test(path) ? path.slice(1).replaceAll('/', '\\') : path;
-  } catch { return ''; }
+  return directoryFromFileUri(uri);
 }
 async function finish(event) {
   observer?.close(); observer = null;
@@ -62,9 +57,9 @@ async function finish(event) {
     details.append(download);
   }
 }
-function observe(id) {
+async function observe(id) {
   observer?.close(); jobId = id; setStorage('amp-scan-job', id); busy(true);
-  observer = new EventSource('/api/scan/' + encodeURIComponent(id) + '/stream');
+  observer = await apiStream('/api/scan/' + encodeURIComponent(id) + '/stream');
   observer.onmessage = event => {
     const data = JSON.parse(event.data);
     if (data.phase === 'walk') status(`Found ${data.found} audio files…`);
@@ -83,10 +78,10 @@ function observe(id) {
 }
 export async function recoverScan() {
   const {scan} = await api('/api/scan/status');
-  if (scan && !scan.finished) { observe(scan.jobId); return; }
+  if (scan && !scan.finished) { await observe(scan.jobId); return; }
   const saved = getStorage('amp-scan-job', '');
   if (saved) {
-    try { const job = await api('/api/scan/' + encodeURIComponent(saved)); if(job.finished) await finish(job.event); else observe(saved); }
+    try { const job = await api('/api/scan/' + encodeURIComponent(saved)); if(job.finished) await finish(job.event); else await observe(saved); }
     catch { setStorage('amp-scan-job',''); }
   }
 }
@@ -94,7 +89,7 @@ export async function doImport(directory) {
   if (state.busy) { status('A scan is already running. You can cancel it below.'); return; }
   if (!directory) { status('Choose or enter an absolute folder path.', 'is-error'); return; }
   document.getElementById('scanFailures').replaceChildren(); busy(true); status('Starting scan…');
-  try { const data = await api('/api/scan', {method:'POST',body:JSON.stringify({directory})}); observe(data.jobId); }
+  try { const data = await api('/api/scan', {method:'POST',body:JSON.stringify({directory})}); await observe(data.jobId); }
   catch (error) { busy(false); status(error.message, 'is-error'); }
 }
 document.getElementById('cancelScanButton').addEventListener('click', async () => {

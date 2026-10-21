@@ -54,14 +54,34 @@ async function readResponseBody(res) {
   return { error: await res.text() };
 }
 
-let sessionPromise = null;
+let accessToken = "";
+let sessionData = null;
 let mutationChain = Promise.resolve();
-async function sessionToken() {
-  sessionPromise ||= fetch("/api/session", { cache: "no-store", signal: AbortSignal.timeout(5000) }).then(async response => {
-    if (!response.ok) throw new ApiError("Could not open a local session.");
-    return (await response.json()).token;
-  }).catch(error => { sessionPromise = null; throw error; });
-  return sessionPromise;
+const accessStorageKey = "local-amp-access";
+if (globalThis.location?.hash) {
+  const supplied = new URLSearchParams(globalThis.location.hash.slice(1)).get("local-amp");
+  if (supplied && /^[a-f0-9]{64}$/.test(supplied)) {
+    accessToken = supplied;
+    try { globalThis.sessionStorage?.setItem(accessStorageKey, supplied); } catch { /* Memory-only session still works. */ }
+    globalThis.history?.replaceState(null, "", globalThis.location.pathname + globalThis.location.search);
+  }
+}
+function sessionToken() {
+  if (!accessToken) { try { accessToken = globalThis.sessionStorage?.getItem(accessStorageKey) || ""; } catch { /* Storage may be disabled. */ } }
+  if (!accessToken) throw new ApiError("Open Local Amp from its launcher to authorize this browser session.", { status: 403 });
+  return accessToken;
+}
+export function metricsUrl() { return sessionData?.metricsUrl || "#"; }
+export async function apiStream(path) {
+  const data = await api("/api/access", {method:"POST",body:JSON.stringify({paths:[path]})});
+  return new EventSource(data.urls[0]);
+}
+export async function apiDownload(path, name) {
+  const response = await fetch(path, {headers:{"x-local-amp-token":sessionToken()},cache:"no-store",signal:AbortSignal.timeout(120000)});
+  if (!response.ok) { const data=await readResponseBody(response); throw new ApiError(data.error || "Download failed.", {status:response.status}); }
+  const url=URL.createObjectURL(await response.blob());
+  const anchor=document.createElement("a"); anchor.href=url; anchor.download=name; anchor.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 export function api(path, options = {}) {
   if (!options.method || ["GET", "HEAD"].includes(options.method.toUpperCase())) return request(path, options);
@@ -86,19 +106,12 @@ async function request(path, options = {}) {
   }
 
   try {
-    if (fetchOptions.method && !["GET", "HEAD"].includes(fetchOptions.method.toUpperCase())) {
-      requestHeaders.set("x-local-amp-token", await sessionToken());
-    }
-    let res = await fetch(path, {
+    requestHeaders.set("x-local-amp-token", sessionToken());
+    const res = await fetch(path, {
       ...fetchOptions,
       headers: requestHeaders,
       signal: merged.signal
     });
-    if (res.status === 403 && requestHeaders.has("x-local-amp-token")) {
-      sessionPromise = null;
-      requestHeaders.set("x-local-amp-token", await sessionToken());
-      res = await fetch(path, { ...fetchOptions, headers: requestHeaders, signal: merged.signal });
-    }
     const data = await readResponseBody(res);
     if (!res.ok) {
       throw new ApiError(data.detail || data.error || `Request failed (${res.status}).`, {
@@ -107,6 +120,7 @@ async function request(path, options = {}) {
         data
       });
     }
+    if (path === "/api/session") sessionData = data;
     return data;
   } catch (error) {
     if (error instanceof ApiError) throw error;

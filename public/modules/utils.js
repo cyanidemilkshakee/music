@@ -20,9 +20,8 @@ export function fmt(secs) {
 
 /** Get artwork URL or default cover */
 export function coverUrl(track) {
-  return track?.hasArtwork
-    ? `/api/artwork/${encodeURIComponent(track.id)}?v=${encodeURIComponent(track.metadataExtractedAt || track.modifiedAt || "0")}`
-    : DEFAULT_COVER;
+  return track?.hasArtwork && track.artworkUrl?.startsWith("/api/artwork/")
+    ? track.artworkUrl : DEFAULT_COVER;
 }
 
 /** Best display title for a track */

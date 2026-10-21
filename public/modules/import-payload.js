@@ -16,6 +16,30 @@ export function importLimits(health) {
   return { jsonLimitBytes: limits.jsonLimitBytes, m3uTextBytes: limits.m3uTextBytes };
 }
 
+export async function readImportFile(file, limit, label) {
+  if (!Number.isSafeInteger(limit) || limit <= 0 || !Number.isSafeInteger(file?.size) || file.size < 0) {
+    throw new Error('Could not verify the import file size. Select the file again.');
+  }
+  if (file.size > limit) {
+    throw new Error(`${label} file is ${formatBytes(file.size)} (${file.size.toLocaleString()} bytes); the read limit is ${formatBytes(limit)} (${limit.toLocaleString()} bytes). Choose a smaller file before importing.`);
+  }
+  return file.text();
+}
+
+export function directoryFromFileUri(uri) {
+  try {
+    const url = new URL(uri);
+    if (url.protocol !== 'file:' || (url.hostname && url.hostname !== 'localhost')) return '';
+    const path = decodeURIComponent(url.pathname);
+    if (/[\u0000-\u001f\u007f]/.test(path) || /^[/\\]{2}/.test(path)) return '';
+    if (/^\/[A-Za-z]:\//.test(path)) {
+      const localPath = path.slice(1).replaceAll('/', '\\');
+      return localPath.slice(2).includes(':') ? '' : localPath;
+    }
+    return path.startsWith('/') && !path.includes('\\') ? path : '';
+  } catch { return ''; }
+}
+
 function checkBytes(text, limit, label) {
   const bytes = encoder.encode(text).byteLength;
   if (bytes > limit) {

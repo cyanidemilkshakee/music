@@ -1,10 +1,10 @@
 import { state } from './state.js';
-import { api } from './api.js';
+import { api, apiDownload, metricsUrl } from './api.js';
 import { esc, trackTitle } from './utils.js';
 import { getStorage, setStorage } from './storage.js';
 import { trapModalFocus } from './modal-focus.js';
 import { refreshLibrary as reloadLibrary } from './library-data.js';
-import { importLimits, backupBody, m3uBody, formatBytes } from './import-payload.js';
+import { importLimits, backupBody, m3uBody, formatBytes, readImportFile } from './import-payload.js';
 import { playTrack } from './player.js';
 function dialog(title, body) {
   const overlay = document.createElement('div'); overlay.className='glass-dialog-layer is-open';
@@ -43,7 +43,7 @@ export async function reorderPlaylist(id, direction) {
   state.sortField='none';await reloadLibrary();
 }
 export function exportPlaylist(id) {
-  const anchor=document.createElement('a');anchor.href='/api/playlists/'+encodeURIComponent(id)+'/m3u';anchor.download='playlist.m3u';anchor.click();
+  return apiDownload('/api/playlists/'+encodeURIComponent(id)+'/m3u','playlist.m3u');
 }
 function download(data, name) {
   const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
@@ -88,8 +88,8 @@ function openSettings() {
   const {overlay,close}=dialog('Library & Playback',`
     <section class="settings-section" aria-label="Library summary"><h3>Your library</h3><div data-library-stats aria-live="polite"><p>Loading library summary…</p></div><h4>Recently played</h4><div data-recent-playback aria-live="polite"><p>Loading recent playback…</p></div></section>
     <section class="settings-section" aria-label="Playback settings"><h3>Playback</h3><label for="qualitySelect">Playback quality</label><select id="qualitySelect"><option value="lossless">Original / lossless fallback</option><option value="compatibility">MP3 compatibility</option></select><label for="gainSelect">ReplayGain</label><select id="gainSelect"><option value="off">Off</option><option value="track">Track tags (safe attenuation)</option></select><p>Playback resumes when you press Play after reopening. MP3 compatibility converts audio and reduces quality. ReplayGain reduces tagged track levels to prevent clipping; untagged tracks keep their original level.</p></section>
-    <section class="settings-section" aria-label="Library backup and import"><h3>Backup & import</h3><div class="settings-actions"><button class="glass-btn" data-backup>Download library backup</button><label class="glass-btn">Restore backup<input type="file" data-restore accept=".json,application/json"></label><label class="glass-btn">Import M3U<input type="file" data-m3u accept=".m3u,.m3u8"></label></div><p>Backups include metadata, local paths, playlists, favorites, and recent tracks. Music files are separate. Restore merges entries and preserves existing playlists. M3U imports match absolute paths already in this library.</p><p data-import-limits aria-live="polite">Checking server import limits…</p></section>
-    <details class="settings-section settings-diagnostics" open><summary>Server & diagnostics</summary><div data-server-health aria-live="polite"><p>Checking database and audio tools…</p></div><p id="cacheUsage" aria-live="polite">Checking cache usage…</p><div class="settings-actions"><button class="glass-btn" data-diagnostics-refresh>Refresh diagnostics</button><button class="glass-btn" data-clear-cache>Clear audio cache</button><a class="glass-btn" href="/metrics" target="_blank" rel="noopener">Open server metrics</a></div><p>Metrics report server requests and performance for troubleshooting. Clearing the cache keeps your music files and library entries.</p><button class="glass-btn danger" data-stop>Stop Local Amp server</button></details>
+    <section class="settings-section" aria-label="Library backup and import"><h3>Backup & import</h3><div class="settings-actions"><button class="glass-btn" data-backup>Download library backup</button><label class="glass-btn">Restore backup<input type="file" data-restore accept=".json,application/json"></label><label class="glass-btn">Import M3U<input type="file" data-m3u accept=".m3u,.m3u8"></label></div><p>Backups include metadata, local paths, playlists, favorites, and recent tracks. Music files are separate. Import your music folders with Add Folder before restoring a backup from another installation. Restore merges entries in your approved folders and preserves existing playlists. M3U imports match absolute paths already in this library.</p><p data-import-limits aria-live="polite">Checking server import limits…</p></section>
+    <details class="settings-section settings-diagnostics" open><summary>Server & diagnostics</summary><div data-server-health aria-live="polite"><p>Checking database and audio tools…</p></div><p id="cacheUsage" aria-live="polite">Checking cache usage…</p><div class="settings-actions"><button class="glass-btn" data-diagnostics-refresh>Refresh diagnostics</button><button class="glass-btn" data-clear-cache>Clear audio cache</button><a class="glass-btn" href="${esc(metricsUrl())}" target="_blank" rel="noopener noreferrer">Open server metrics</a></div><p>Metrics report server requests and performance for troubleshooting. Clearing the cache keeps your music files and library entries.</p><button class="glass-btn danger" data-stop>Stop Local Amp server</button></details>
     <p class="dialog-status" role="status"></p>`);
   const statsPanel = overlay.querySelector('[data-library-stats]');
   const recentPanel = overlay.querySelector('[data-recent-playback]');
@@ -108,7 +108,7 @@ function openSettings() {
   function displayLimits(health) {
     const limits = importLimits(health);
     limitPanel.classList.remove('is-error');
-    limitPanel.textContent = `Server limits: ${formatBytes(limits.jsonLimitBytes)} per JSON request; ${formatBytes(limits.m3uTextBytes)} of M3U text. Imports are checked after JSON encoding.`;
+    limitPanel.textContent = `Server limits: ${formatBytes(limits.jsonLimitBytes)} per JSON request; ${formatBytes(limits.m3uTextBytes)} of M3U text. File sizes are checked before reading and request sizes after JSON encoding.`;
     return limits;
   }
   async function refreshCache() {
@@ -166,14 +166,14 @@ function openSettings() {
     const file=event.target.files[0];if(!file)return;
     event.target.disabled=true;
     status.textContent='Checking backup and server limits…';
-    try{const limits=await verifiedLimits();const body=backupBody(await file.text(),limits);const data=await api('/api/backup/restore',{method:'POST',body,timeoutMs:120000});await reloadLibrary();status.textContent=`Restored ${data.imported} playlists. ${data.skipped} existing or unavailable entries skipped.`;await refreshDiagnostics();}
+    try{const limits=await verifiedLimits();const body=backupBody(await readImportFile(file,limits.jsonLimitBytes,'Backup'),limits);const data=await api('/api/backup/restore',{method:'POST',body,timeoutMs:120000});await reloadLibrary();status.textContent=`Restored ${data.imported} playlists. ${data.skipped} existing or unavailable entries skipped.`;await refreshDiagnostics();}
     catch(error){status.textContent=error.message;}finally{event.target.disabled=false;event.target.value='';}
   };
   overlay.querySelector('[data-m3u]').onchange=async event=>{
     const file=event.target.files[0];if(!file)return;
     event.target.disabled=true;
     status.textContent='Checking playlist and server limits…';
-    try{const limits=await verifiedLimits();const body=m3uBody(file.name,await file.text(),limits);const data=await api('/api/playlists/import',{method:'POST',body});await reloadLibrary();status.textContent=`Imported playlist. ${data.skipped} paths absent from this library were skipped.`;}
+    try{const limits=await verifiedLimits();const body=m3uBody(file.name,await readImportFile(file,Math.min(limits.m3uTextBytes,limits.jsonLimitBytes),'Playlist'),limits);const data=await api('/api/playlists/import',{method:'POST',body});await reloadLibrary();status.textContent=`Imported playlist. ${data.skipped} paths absent from this library were skipped.`;}
     catch(error){status.textContent=error.message;}finally{event.target.disabled=false;event.target.value='';}
   };
 }
