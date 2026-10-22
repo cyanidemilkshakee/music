@@ -52,6 +52,8 @@ npm run bench
 npm run build
 ~~~
 
+Cargo output in **backend/target** is local build cache and can grow across debug, release and verification builds. It is ignored by Git. To reclaim that space, run `node scripts/clean-rust-artifacts.js` from the repository root. This removes only **backend/target**, including custom verification build folders; the next Rust build will compile its artifacts again. Run it when the cache has grown, not after every build.
+
 Development binaries under **backend/target** default to this repository's **data** directory to retain existing libraries. Distributed binaries default to the per-user directory. **DATA_DIR** overrides both; relative overrides resolve against the server working directory.
 
 Optional configuration: copy **.env.example** to **.env**. Environment variables take precedence. Use absolute paths for data/tools. The server must bind to a loopback address; it validates local Host/Origin, rejects cross-site requests, and requires the private launch credential in **x-local-amp-token** for all API and metrics requests. Browser credentials remain in sessionStorage for this origin and tab; they are not set as HTTP cookies or put in HTTP query strings. Native audio, artwork and metrics links use narrowly scoped signed URLs rather than the broad session credential. Other local accounts cannot retrieve the credential through an anonymous session request; processes running as your own account can read your files and remain within the same trust boundary.

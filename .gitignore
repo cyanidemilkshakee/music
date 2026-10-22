@@ -14,9 +14,12 @@ node_modules/
 *.log
 
 # Rust Build Artifacts
-target/
-backend/target/
+# Cargo output grows with debug symbols, incremental builds, and build profiles.
+**/target/
 backend/test_data_api/
+
+# Local database snapshots and recovery backups
+**/data/backups/
 
 # Environments
 .env
