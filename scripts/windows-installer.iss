@@ -21,10 +21,14 @@ WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayName=Local Amp
+#ifdef SignLocalAmp
+SignTool=LocalAmpVerifiedSign
+SignedUninstaller=yes
+#endif
 
 [Files]
 Source: "..\backend\target\x86_64-pc-windows-msvc\release\backend.exe"; DestDir: "{app}"; DestName: "LocalAmp.exe"; Flags: ignoreversion
-Source: "Launch-LocalAmp.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\packaging\Launch-LocalAmp.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion

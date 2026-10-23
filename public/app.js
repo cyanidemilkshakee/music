@@ -1,5 +1,5 @@
 import { showTrackDetails, reorderPlaylist, exportPlaylist } from "./modules/manage-library.js";
-import { state } from "./modules/state.js";
+import { state, DEFAULT_COVER } from "./modules/state.js";
 import { hydrateIcons } from "./modules/icons.js";
 import { api } from "./modules/api.js";
 import { el } from "./modules/dom.js";
@@ -55,9 +55,9 @@ import "./modules/shortcuts.js";
 document.addEventListener("error", event => {
   const image = event.target;
   if (!(image instanceof HTMLImageElement)) return;
-  if (image.dataset.fallbackApplied || image.getAttribute("src") === "/assets/default-cover.svg") return;
+  if (image.dataset.fallbackApplied || image.getAttribute("src") === DEFAULT_COVER) return;
   image.dataset.fallbackApplied = "true";
-  image.src = "/assets/default-cover.svg";
+  image.src = DEFAULT_COVER;
 }, true);
 
 const DOUBLE_PLAY_WINDOW_MS = 650;
@@ -126,6 +126,7 @@ document.addEventListener('library-updated', () => {
 });
 
 async function loadState() {
+  await api('/api/session');
   const [health, result] = await Promise.all([
     api('/api/health', { timeoutMs: 15000 }).catch(error => error.data || { ok: false, error: error.message }),
     refreshLibrary({ initial: !queueReady }).then(() => ({ ok: true })).catch(error => ({ error: error.message }))
@@ -194,7 +195,7 @@ loadState().catch(error => {
   render();
 });
 
-document.addEventListener("click", event => {
+document.addEventListener("click", async event => {
   try {
     if (!el.contextMenu.contains(event.target)) closeCtx();
 
@@ -236,7 +237,7 @@ document.addEventListener("click", event => {
     const playlistMove=event.target.closest("[data-playlist-move]");
     if(playlistMove) {reorderPlaylist(playlistMove.dataset.playlistMove,Number(playlistMove.dataset.direction)).catch(showActionError);return;}
     const exportButton=event.target.closest("[data-playlist-export]");
-    if(exportButton) {exportPlaylist(exportButton.dataset.playlistExport);return;}
+    if(exportButton) {await exportPlaylist(exportButton.dataset.playlistExport);return;}
     if (event.target.closest('[data-library-retry]')) { loadLibraryPage({ force: true }); renderGrid(); return; }
     const gridPage=event.target.closest("[data-grid-page]");
     if(gridPage) {state.gridOffset=Math.max(0,(state.gridOffset || 0)+Number(gridPage.dataset.gridPage)*state.gridPageSize);renderGrid();el.contentScroll.scrollTop=0;return;}
