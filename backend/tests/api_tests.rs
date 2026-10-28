@@ -15,6 +15,7 @@ struct ServerGuard {
     child: Child,
     _data_dir: TempDir,
     port: u16,
+    token: String,
 }
 
 impl Drop for ServerGuard {
@@ -29,6 +30,14 @@ async fn start_server() -> ServerGuard {
 }
 
 async fn start_server_with_tools(ffmpeg: &str, ffprobe: &str) -> ServerGuard {
+    start_server_with_limits(ffmpeg, ffprobe, &[]).await
+}
+
+async fn start_server_with_limits(
+    ffmpeg: &str,
+    ffprobe: &str,
+    limits: &[(&str, &str)],
+) -> ServerGuard {
     // A released ephemeral reservation can be reused by another concurrently
     // starting test. Match the actual child, never a foreign ready server.
     for _attempt in 0..8 {
@@ -43,6 +52,12 @@ async fn start_server_with_tools(ffmpeg: &str, ffprobe: &str) -> ServerGuard {
             .env("JSON_LIMIT", "20mb")
             .env("MAX_SCAN_FILES", "100000")
             .env("MAX_SCAN_FAILURES", "10000")
+            .env("MAX_SCAN_ENTRIES", "1000000")
+            .env("MAX_SCAN_DIRECTORIES", "100000")
+            .env("MAX_SCAN_HASH_MB", "524288")
+            .env("MAX_SCAN_FILE_MB", "8192")
+            .env("FINGERPRINT_TIMEOUT_MS", "30000")
+            .env("SCAN_TIMEOUT_MS", "1800000")
             .env("FFMPEG_PATH", ffmpeg)
             .env("FFPROBE_PATH", ffprobe)
             .env("SCAN_CONCURRENCY", "2")
@@ -50,6 +65,7 @@ async fn start_server_with_tools(ffmpeg: &str, ffprobe: &str) -> ServerGuard {
             .env("STREAM_CONCURRENCY", "4")
             .env("FFPROBE_TIMEOUT_MS", "10000")
             .env("FFMPEG_TIMEOUT_MS", "60000")
+            .envs(limits.iter().copied())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .current_dir(data_dir.path())
@@ -63,7 +79,7 @@ async fn start_server_with_tools(ffmpeg: &str, ffprobe: &str) -> ServerGuard {
                 break;
             }
             if let Ok(response) = client
-                .get(format!("http://127.0.0.1:{port}/api/session"))
+                .get(format!("http://127.0.0.1:{port}/api/identity"))
                 .send()
                 .await
             {
@@ -74,10 +90,22 @@ async fn start_server_with_tools(ffmpeg: &str, ffprobe: &str) -> ServerGuard {
                         session["app"] == "LocalAmp" && session["processId"] == child.id()
                     })
                 {
+                    let launch = std::fs::read(data_dir.path().join("launch.json"))
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                    let Some(launch) = launch
+                        .filter(|value| value["processId"] == child.id() && value["port"] == port)
+                    else {
+                        continue;
+                    };
+                    let Some(secret) = launch["bootstrapToken"].as_str() else {
+                        continue;
+                    };
                     return ServerGuard {
                         child,
                         _data_dir: data_dir,
                         port,
+                        token: secret.to_owned(),
                     };
                 }
             }
@@ -96,7 +124,7 @@ fn url(server: &ServerGuard, path: &str) -> String {
 #[tokio::test]
 async fn test_health_check() {
     let _guard = start_server().await;
-    let client = Client::new();
+    let client = auth_client(&_guard);
 
     let res = client
         .get(url(&_guard, "/api/health"))
@@ -112,7 +140,7 @@ async fn test_health_check() {
 #[tokio::test]
 async fn test_get_state() {
     let _guard = start_server().await;
-    let client = Client::new();
+    let client = auth_client(&_guard);
 
     let res = client
         .get(url(&_guard, "/api/state"))
@@ -129,7 +157,7 @@ async fn test_get_state() {
 #[tokio::test]
 async fn test_metrics_exposed() {
     let _guard = start_server().await;
-    let client = Client::new();
+    let client = auth_client(&_guard);
 
     let res = client
         .get(url(&_guard, "/metrics"))
@@ -144,7 +172,7 @@ async fn test_metrics_exposed() {
 #[tokio::test]
 async fn test_library_sources_exposed() {
     let guard = start_server().await;
-    let response = Client::new()
+    let response = auth_client(&guard)
         .get(url(&guard, "/api/library/sources"))
         .send()
         .await
@@ -156,18 +184,220 @@ async fn test_library_sources_exposed() {
 }
 
 async fn token(server: &ServerGuard) -> String {
-    Client::new()
-        .get(url(server, "/api/session"))
+    server.token.clone()
+}
+
+fn auth_client(server: &ServerGuard) -> Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-local-amp-token", server.token.parse().unwrap());
+    Client::builder().default_headers(headers).build().unwrap()
+}
+
+#[tokio::test]
+async fn private_bootstrap_credentials_protect_reads_and_separate_instances() {
+    let server = start_server().await;
+    let other = start_server().await;
+    let anonymous = Client::new();
+    for path in [
+        "/api/session",
+        "/api/state",
+        "/api/backup",
+        "/metrics",
+        "/api/original/missing",
+    ] {
+        assert_eq!(
+            anonymous
+                .get(url(&server, path))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403,
+            "{path}"
+        );
+    }
+    let identity: serde_json::Value = anonymous
+        .get(url(&server, "/api/identity"))
         .send()
         .await
         .unwrap()
-        .json::<serde_json::Value>()
+        .json()
         .await
-        .unwrap()["token"]
-        .as_str()
-        .unwrap()
-        .into()
+        .unwrap();
+    assert_eq!(identity["processId"], server.child.id());
+    assert!(identity.get("token").is_none());
+    assert!(identity.get("bootstrapToken").is_none());
+    assert_ne!(server.token, other.token);
+    assert_eq!(
+        auth_client(&server)
+            .get(url(&other, "/api/session"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    let session = auth_client(&server)
+        .get(url(&server, "/api/session"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(session.status(), 200);
+    assert_eq!(session.headers().get("cache-control").unwrap(), "no-store");
 }
+
+#[tokio::test]
+async fn resource_capabilities_are_scoped_and_cannot_replace_api_credentials() {
+    let server = start_server().await;
+    let authenticated = auth_client(&server);
+    let response = authenticated
+        .post(url(&server, "/api/access"))
+        .json(&serde_json::json!({"paths":["/metrics"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let data: serde_json::Value = response.json().await.unwrap();
+    let grant = data["urls"][0].as_str().unwrap();
+    assert!(!grant.contains(&server.token));
+    let anonymous = Client::new();
+    assert_eq!(
+        anonymous
+            .get(url(&server, grant))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    let signature = grant.split("access=").nth(1).unwrap();
+    for path in [
+        format!("/api/state?access={signature}"),
+        format!("/metrics?x=1&access={signature}"),
+    ] {
+        assert_eq!(
+            anonymous
+                .get(url(&server, &path))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+    }
+    assert_eq!(
+        anonymous
+            .get(url(&server, &format!("/api/state?token={}", server.token)))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        authenticated
+            .post(url(&server, "/api/access"))
+            .json(&serde_json::json!({"paths":["/api/backup"]}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+}
+
+#[tokio::test]
+async fn incomplete_request_bodies_expire_and_release_buffer_capacity() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server =
+        start_server_with_limits("ffmpeg", "ffprobe", &[("REQUEST_READ_TIMEOUT_MS", "1000")]).await;
+    let mut sockets = Vec::new();
+    for _ in 0..8 {
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", server.port))
+            .await
+            .unwrap();
+        socket.write_all(format!("POST /api/playlists HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nx-local-amp-token: {}\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{", server.port, server.token).as_bytes()).await.unwrap();
+        sockets.push(socket);
+    }
+    for socket in &mut sockets {
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 408"));
+    }
+    assert_eq!(
+        auth_client(&server)
+            .get(url(&server, "/api/state"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn launch_credentials_have_a_protected_owner_only_dacl() {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        Foundation::LocalFree,
+        Security::{
+            Authorization::{
+                ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
+                SDDL_REVISION_1, SE_FILE_OBJECT,
+            },
+            DACL_SECURITY_INFORMATION,
+        },
+    };
+    let server = start_server().await;
+    for name in ["launch.json", "launch.html"] {
+        let path = server._data_dir.path().join(name);
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut descriptor = std::ptr::null_mut();
+        let code = unsafe {
+            GetNamedSecurityInfoW(
+                wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        assert_eq!(code, 0);
+        let mut text = std::ptr::null_mut();
+        let mut length = 0;
+        let success = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                &mut length,
+            )
+        };
+        assert_ne!(success, 0);
+        let sddl = unsafe {
+            String::from_utf16_lossy(std::slice::from_raw_parts(
+                text,
+                length.saturating_sub(1) as usize,
+            ))
+        };
+        unsafe {
+            LocalFree(text.cast());
+            LocalFree(descriptor);
+        }
+        assert!(sddl.starts_with("D:P"), "{sddl}");
+        assert_eq!(sddl.matches("(A;").count(), 2, "{sddl}");
+        assert!(sddl.contains(";;;SY)") && sddl.contains(";;;OW)"), "{sddl}");
+    }
+}
+
 async fn scan(client: &Client, server: &ServerGuard, path: &std::path::Path) -> serde_json::Value {
     let response = client
         .post(url(server, "/api/scan"))
@@ -183,6 +413,7 @@ async fn scan(client: &Client, server: &ServerGuard, path: &std::path::Path) -> 
         .to_owned();
     let events = client
         .get(url(server, &format!("/api/scan/{id}/stream")))
+        .header("x-local-amp-token", &server.token)
         .send()
         .await
         .unwrap();
@@ -224,7 +455,7 @@ fn wav(path: &std::path::Path, frequency: u32) {
 #[tokio::test]
 async fn invalid_scan_is_a_structured_client_error() {
     let server = start_server().await;
-    let client = Client::new();
+    let client = auth_client(&server);
     let response = client
         .post(url(&server, "/api/scan"))
         .header("x-local-amp-token", token(&server).await)
@@ -234,6 +465,151 @@ async fn invalid_scan_is_a_structured_client_error() {
         .unwrap();
     assert_eq!(response.status(), 400);
     assert!(response.json::<serde_json::Value>().await.unwrap()["error"].is_string());
+}
+
+#[tokio::test]
+async fn remote_paths_and_self_authorized_backup_roots_are_rejected() {
+    let server = start_server().await;
+    let client = auth_client(&server);
+    let session = token(&server).await;
+    for remote in [
+        r"\\example.invalid\music\track.wav",
+        r"\\?\UNC\example.invalid\music\track.wav",
+        r"\\.\GLOBALROOT\Device\HarddiskVolume1\track.wav",
+        "//example.invalid/music/track.wav",
+    ] {
+        let response = client
+            .post(url(&server, "/api/scan"))
+            .header("x-local-amp-token", &session)
+            .json(&serde_json::json!({"directory":remote}))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400, "{remote}");
+        let error: serde_json::Value = response.json().await.unwrap();
+        assert!(error["error"].as_str().unwrap().contains("local paths"));
+        let response = client.post(url(&server, "/api/backup/restore"))
+            .header("x-local-amp-token", &session)
+            .json(&serde_json::json!({"version":1,"playlists":[],"favorites":[],"sources":[],
+                "tracks":[{"id":"remote","path":remote,"duration":0,"bitRate":0,"hasArtwork":false,"tags":{}}]}))
+            .timeout(Duration::from_secs(2)).send().await.unwrap();
+        assert_eq!(response.status(), 400, "{remote}");
+    }
+    let music = tempfile::tempdir().unwrap();
+    let audio = music.path().join("Unapproved.wav");
+    wav(&audio, 440);
+    let source = serde_json::json!({"id":"source","path":music.path(),"addedAt":"2026-10-14","lastScannedAt":null});
+    let mut backup = serde_json::json!({"version":1,"playlists":[],"favorites":[],"sources":[source],
+        "tracks":[{"id":"unapproved","path":audio,"duration":2,"bitRate":0,"hasArtwork":false,"tags":{}}]});
+    let response = client
+        .post(url(&server, "/api/backup/restore"))
+        .header("x-local-amp-token", &session)
+        .json(&backup)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    assert!(response.json::<serde_json::Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .contains("scan"));
+    scan(&client, &server, music.path()).await;
+    let outside = tempfile::tempdir().unwrap();
+    let outside_audio = outside.path().join("Outside.wav");
+    wav(&outside_audio, 660);
+    backup["tracks"][0]["path"] = serde_json::json!(outside_audio);
+    assert_eq!(
+        client
+            .post(url(&server, "/api/backup/restore"))
+            .header("x-local-amp-token", &session)
+            .json(&backup)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400,
+        "A valid audio file outside the independently approved root must still be rejected"
+    );
+    let private = music.path().join("Private.txt");
+    std::fs::write(&private, b"private contents").unwrap();
+    backup["tracks"][0]["path"] = serde_json::json!(private);
+    assert_eq!(
+        client
+            .post(url(&server, "/api/backup/restore"))
+            .header("x-local-amp-token", &session)
+            .json(&backup)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    let fake_audio = music.path().join("Fake.wav");
+    std::fs::write(&fake_audio, b"private contents with an audio filename").unwrap();
+    backup["tracks"][0]["path"] = serde_json::json!(fake_audio);
+    assert_eq!(
+        client
+            .post(url(&server, "/api/backup/restore"))
+            .header("x-local-amp-token", &session)
+            .json(&backup)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    let state: serde_json::Value = client
+        .get(url(&server, "/api/state"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(state["trackIds"].as_array().unwrap().len(), 1);
+    let playlists: Vec<_> = (0..10).map(|number| serde_json::json!({
+        "id":format!("p{number}"),"name":"Bounded","createdAt":"","updatedAt":"","trackIds":vec!["reference";10000]
+    })).collect();
+    let oversized = serde_json::json!({"version":1,"playlists":playlists,"favorites":["reference"],"tracks":[],"sources":[]});
+    let response = client
+        .post(url(&server, "/api/backup/restore"))
+        .header("x-local-amp-token", &session)
+        .json(&oversized)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    assert!(response.json::<serde_json::Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .contains("total track references"));
+}
+
+#[tokio::test]
+async fn scan_work_limits_include_nonaudio_entries_and_directories() {
+    let music = tempfile::tempdir().unwrap();
+    for number in 0..4 {
+        std::fs::write(music.path().join(format!("{number}.txt")), b"text").unwrap();
+    }
+    let server = start_server_with_limits("ffmpeg", "ffprobe", &[("MAX_SCAN_ENTRIES", "2")]).await;
+    let client = auth_client(&server);
+    let result = scan(&client, &server, music.path()).await;
+    assert!(result["failureCount"].as_u64().unwrap() > 0);
+    assert!(result["failures"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("entry limit"));
+    let dirs = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dirs.path().join("one/two/three")).unwrap();
+    let limited =
+        start_server_with_limits("ffmpeg", "ffprobe", &[("MAX_SCAN_DIRECTORIES", "2")]).await;
+    let result = scan(&client, &limited, dirs.path()).await;
+    assert!(result["failureCount"].as_u64().unwrap() > 0);
+    assert!(result["failures"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("directory limit"));
 }
 #[tokio::test]
 async fn local_security_and_error_contracts() {
@@ -282,6 +658,7 @@ async fn local_security_and_error_contracts() {
     assert!(response.json::<serde_json::Value>().await.unwrap()["error"].is_string());
     let response = client
         .get(url(&server, "/api/unknown"))
+        .header("x-local-amp-token", &token)
         .send()
         .await
         .unwrap();
@@ -298,7 +675,7 @@ async fn local_security_and_error_contracts() {
 #[tokio::test]
 async fn successful_scan_rescan_move_and_missing_file_preserve_identity() {
     let server = start_server().await;
-    let client = Client::new();
+    let client = auth_client(&server);
     let root = server._data_dir.path().join("Music");
     std::fs::create_dir(&root).unwrap();
     wav(&root.join("Unicode-音.wav"), 440);
@@ -386,7 +763,7 @@ async fn successful_scan_rescan_move_and_missing_file_preserve_identity() {
 #[tokio::test]
 async fn original_audio_ranges_seek_and_conditional_reads() {
     let server = start_server().await;
-    let client = Client::new();
+    let client = auth_client(&server);
     let root = server._data_dir.path().join("Music");
     std::fs::create_dir(&root).unwrap();
     let file = root.join("Tone.wav");
@@ -480,7 +857,7 @@ async fn original_audio_ranges_seek_and_conditional_reads() {
 #[tokio::test]
 async fn playlists_validation_atomic_membership_backup_and_paging() {
     let server = start_server().await;
-    let client = Client::new();
+    let client = auth_client(&server);
     let token = token(&server).await;
     let response = client
         .post(url(&server, "/api/playlists"))
@@ -610,9 +987,13 @@ async fn playlists_validation_atomic_membership_backup_and_paging() {
 #[tokio::test]
 async fn concurrent_lossless_decode_backup_restore_and_m3u_round_trip() {
     let server = start_server().await;
-    let client = Client::new();
+    let second = start_server().await;
+    let client = auth_client(&server);
     let session_token = token(&server).await;
     let music = tempfile::tempdir().unwrap();
+    // The destination independently approves the local folder before any
+    // backup references it. Backup source entries cannot authorize themselves.
+    scan(&client, &second, music.path()).await;
     wav(&music.path().join("Backup 音楽.wav"), 440);
     scan(&client, &server, music.path()).await;
     let state: serde_json::Value = client
@@ -773,7 +1154,6 @@ async fn concurrent_lossless_decode_backup_restore_and_m3u_round_trip() {
         .json()
         .await
         .unwrap();
-    let second = start_server().await;
     let second_token = token(&second).await;
     let restored = client
         .post(url(&second, "/api/backup/restore"))
@@ -785,6 +1165,7 @@ async fn concurrent_lossless_decode_backup_restore_and_m3u_round_trip() {
     assert_eq!(restored.status(), 200);
     let state: serde_json::Value = client
         .get(url(&second, "/api/state"))
+        .header("x-local-amp-token", &second_token)
         .send()
         .await
         .unwrap()
@@ -797,6 +1178,7 @@ async fn concurrent_lossless_decode_backup_restore_and_m3u_round_trip() {
     assert_eq!(state["playlists"][0]["trackIds"][0], id);
     let recent: serde_json::Value = client
         .get(url(&second, "/api/recent"))
+        .header("x-local-amp-token", &second_token)
         .send()
         .await
         .unwrap()
@@ -822,6 +1204,7 @@ async fn concurrent_lossless_decode_backup_restore_and_m3u_round_trip() {
     );
     let after: serde_json::Value = client
         .get(url(&second, &format!("/api/tracks/{id}")))
+        .header("x-local-amp-token", &second_token)
         .send()
         .await
         .unwrap()
@@ -838,7 +1221,7 @@ async fn missing_tools_are_actionable_and_scan_cancellation_finishes() {
         "local-amp-nonexistent-ffprobe",
     )
     .await;
-    let client = Client::new();
+    let client = auth_client(&missing);
     let response = client
         .get(url(&missing, "/api/health"))
         .send()
@@ -852,6 +1235,7 @@ async fn missing_tools_are_actionable_and_scan_cancellation_finishes() {
         .unwrap()
         .contains("FFmpeg"));
     let server = start_server().await;
+    let client = auth_client(&server);
     let session = token(&server).await;
     let music = tempfile::tempdir().unwrap();
     for number in 0..100 {
@@ -930,8 +1314,9 @@ async fn authorized_shutdown_exits_without_losing_the_database() {
 #[tokio::test]
 async fn configured_json_limit_allows_large_backups_and_rejects_oversize_json() {
     let server = start_server().await;
-    let client = Client::new();
+    let client = auth_client(&server);
     let token = token(&server).await;
+    scan(&client, &server, server._data_dir.path()).await;
     let mut backup = serde_json::json!({
         "version":1,"playlists":[],"favorites":[],"sources":[],"recent":[],
         "tracks":[{"id":"large-backup","path":server._data_dir.path().join("Missing file.wav"),
@@ -965,11 +1350,12 @@ async fn configured_json_limit_allows_large_backups_and_rejects_oversize_json() 
 
 #[tokio::test]
 async fn lightweight_bootstrap_scoped_pages_groups_and_queue_lookup_contract() {
-    let server = start_server_with_tools("local-amp-no-ffmpeg", "local-amp-no-ffprobe").await;
-    let client = Client::new();
+    let server = start_server_with_tools("local-amp-no-ffmpeg", "ffprobe").await;
+    let client = auth_client(&server);
     let session = token(&server).await;
+    scan(&client, &server, server._data_dir.path()).await;
     let available = server._data_dir.path().join("Available.wav");
-    std::fs::write(&available, b"fixture").unwrap();
+    wav(&available, 440);
     let backup = serde_json::json!({
         "version":1,"sources":[],"favorites":["b"],"recent":["b"],
         "tracks":[
@@ -1097,7 +1483,7 @@ async fn lightweight_bootstrap_scoped_pages_groups_and_queue_lookup_contract() {
 #[tokio::test]
 async fn library_query_and_lookup_reject_invalid_contracts_with_json_errors() {
     let server = start_server_with_tools("local-amp-no-ffmpeg", "local-amp-no-ffprobe").await;
-    let client = Client::new();
+    let client = auth_client(&server);
     for path in [
         "/api/library/tracks?sortField=bogus",
         "/api/library/tracks?favorite=1",
@@ -1130,7 +1516,7 @@ async fn library_query_and_lookup_reject_invalid_contracts_with_json_errors() {
         assert_eq!(response.status(), 400);
         assert!(response.json::<serde_json::Value>().await.unwrap()["error"].is_string());
     }
-    let response = client
+    let response = Client::new()
         .post(url(&server, "/api/library/tracks/lookup"))
         .json(&serde_json::json!({"ids":[]}))
         .send()
@@ -1142,7 +1528,7 @@ async fn library_query_and_lookup_reject_invalid_contracts_with_json_errors() {
 #[tokio::test]
 async fn compact_tracks_expose_fresh_artwork_version_after_metadata_refresh() {
     let server = start_server().await;
-    let client = Client::new();
+    let client = auth_client(&server);
     let music = server._data_dir.path().join("Music");
     std::fs::create_dir(&music).unwrap();
     wav(&music.join("Refresh.wav"), 440);
