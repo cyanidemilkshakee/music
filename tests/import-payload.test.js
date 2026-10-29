@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { importLimits, backupBody, m3uBody, formatBytes } from '../public/modules/import-payload.js';
+import { importLimits, backupBody, m3uBody, formatBytes, readImportFile, directoryFromFileUri } from '../public/modules/import-payload.js';
 
 const bytes = value => new TextEncoder().encode(value).byteLength;
 const limits = jsonLimitBytes => ({ jsonLimitBytes, m3uTextBytes: 2 * 1024 * 1024 });
@@ -45,4 +45,33 @@ test('byte labels describe the units used by the server', () => {
   assert.equal(formatBytes(1024), '1.0 KiB');
   assert.equal(formatBytes(20 * 1024 ** 2), '20.0 MiB');
   assert.equal(formatBytes(1024 ** 3), '1.0 GiB');
+});
+
+test('oversized import files are rejected without reading or parsing them', async () => {
+  let reads = 0;
+  const file = { size: 2049, text() { reads++; throw new Error('must not read'); } };
+  await assert.rejects(readImportFile(file, 2048, 'Backup'), /Backup file.*read limit/);
+  assert.equal(reads, 0);
+  for (const size of [-1, Infinity, 1.5, undefined]) {
+    await assert.rejects(readImportFile({ ...file, size }, 2048, 'Playlist'), /verify the import file size/);
+  }
+  assert.equal(reads, 0);
+});
+
+test('imports at the exact file limit can be read and still undergo encoded checks', async () => {
+  const text = 'C:\\Music\\音楽.mp3\n';
+  let reads = 0;
+  const file = { size: bytes(text), async text() { reads++; return text; } };
+  assert.equal(await readImportFile(file, bytes(text), 'Playlist'), text);
+  assert.equal(reads, 1);
+  assert.throws(() => m3uBody('mix.m3u', text, limits(bytes(text))), /escaped paths.*server limit/);
+});
+
+test('folder drops accept local file URIs and reject remote or device paths', () => {
+  assert.equal(directoryFromFileUri('file:///C:/Music/My%20songs'), 'C:\\Music\\My songs');
+  assert.equal(directoryFromFileUri('file://localhost/C:/Music'), 'C:\\Music');
+  assert.equal(directoryFromFileUri('file:///home/me/Music'), '/home/me/Music');
+  for (const uri of [undefined, 'https://example.com/music', 'file://server/share/music', 'file:////server/share/music', 'file:///%5C%5Cserver/share/music', 'file:///C:/Music/track.mp3:private', 'file:///C:/Music/%00', 'file:///C:/Music/%ZZ']) {
+    assert.equal(directoryFromFileUri(uri), '', String(uri));
+  }
 });

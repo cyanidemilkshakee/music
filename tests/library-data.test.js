@@ -19,10 +19,11 @@ const page = tracks => ({ tracks, total: tracks.length, groups: [] });
 const pageRequest = path => path.startsWith('/api/library/tracks?');
 
 function fixture(t, handler) {
-  const oldFetch = globalThis.fetch, oldDocument = globalThis.document;
+  const oldFetch = globalThis.fetch, oldDocument = globalThis.document, oldSessionStorage = globalThis.sessionStorage;
   const events = [], document = new EventTarget();
   for (const name of ['tracks-cached', 'library-page-updated', 'library-updated']) document.addEventListener(name, () => events.push(name));
   globalThis.document = document;
+  globalThis.sessionStorage = { getItem: key => key === 'local-amp-access' ? 'f'.repeat(64) : null };
   globalThis.fetch = async (path, options = {}) => path === '/api/session' ? json({ token: 'test-session' }) : handler(String(path), options);
   Object.assign(state, {
     tracks: [], trackIds: ['a', 'b'], playlists: [], currentTrackId: null, selectedTrackId: null,
@@ -37,6 +38,8 @@ function fixture(t, handler) {
   setStorage('amp-favorites-migrated', 'yes');
   t.after(() => {
     globalThis.fetch = oldFetch;
+    if (oldSessionStorage === undefined) delete globalThis.sessionStorage;
+    else globalThis.sessionStorage = oldSessionStorage;
     if (oldDocument === undefined) delete globalThis.document;
     else globalThis.document = oldDocument;
   });

@@ -5,7 +5,7 @@ import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node
 import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // This suite owns its servers, music fixtures and database. It never connects
 // to the user's running server or opens the workspace data directory.
@@ -68,18 +68,20 @@ async function startBackend(binary, name, overrides = {}) {
   servers.push(server);
   await until(async () => {
     if (child.launchError || child.exitCode !== null) throw child.launchError || new Error(log);
-    const response = await fetch(server.base + '/api/session', { signal: AbortSignal.timeout(1000) });
+    const response = await fetch(server.base + '/api/identity', { signal: AbortSignal.timeout(1000) });
     if (!response.ok) return false;
     const session = await response.json();
     if (session.app !== 'LocalAmp' || session.processId !== child.pid) return false;
-    server.token = session.token;
+    const credential = JSON.parse(await readFile(path.join(data, 'launch.json'), 'utf8'));
+    if (credential.processId !== child.pid || credential.port !== port) return false;
+    server.token = credential.bootstrapToken;
     return server.token;
   }, `start isolated ${name} backend`);
   return server;
 }
 
 async function request(server, route, method = 'GET', body, expected = 200) {
-  const headers = method === 'GET' || method === 'HEAD' ? {} : { 'x-local-amp-token': server.token };
+  const headers = { 'x-local-amp-token': server.token };
   if (body !== undefined) headers['content-type'] = 'application/json';
   const response = await fetch(server.base + route, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(120_000),
@@ -134,6 +136,13 @@ async function openImport(directory) {
   return (await (await starting).json()).jobId;
 }
 
+async function clearInitialLibrary(server) {
+  for (const track of (await request(server, '/api/state')).tracks) await request(server, `/api/tracks/${track.id}`, 'DELETE');
+  // The cancellation fixture is deliberately large. Remove its saved source
+  // after testing cancellation so a later backup does not rescan that fixture.
+  for (const source of (await request(server, '/api/library/sources')).sources) await request(server, `/api/library/sources/${source.id}`, 'DELETE');
+}
+
 async function clickRevealedAction(item, selector) {
   // Card and queue actions appear when their item is hovered or focused.
   await item.hover();
@@ -186,8 +195,11 @@ async function apiContracts(server, music) {
 }
 
 async function browserFeatures(server, music, cancellation) {
-  await page.goto(server.base);
+  // Match the launcher: a private local page supplies the credential without
+  // placing the broad secret in browser process arguments or HTTP requests.
+  await page.goto(pathToFileURL(path.join(server.data, 'launch.html')).href);
   await page.locator('#importPanel').waitFor({ state: 'visible' });
+  assert.equal(new URL(page.url()).hash, '', 'The browser must remove the launch fragment.');
   const canceledJob = await openImport(cancellation);
   await page.reload();
   await page.locator('#sidebarImportButton').click();
@@ -196,7 +208,7 @@ async function browserFeatures(server, music, cancellation) {
   await until(async () => (await request(server, `/api/scan/${canceledJob}`)).finished, 'recovered scan cancels');
   await until(async () => /canceled/i.test(await page.locator('#importStatusSheet').textContent()), 'scan cancellation is explained');
   // Completed imports may be kept by design; clear only this test database.
-  for (const track of (await request(server, '/api/state')).tracks) await request(server, `/api/tracks/${track.id}`, 'DELETE');
+  await clearInitialLibrary(server);
   await page.reload();
   const job = await openImport(music);
   await finishScan(server, job);
@@ -332,6 +344,7 @@ async function paginationFeatures(server) {
   const sample = backup.tracks[0], seeded = [];
   const directory = path.join(temporary, 'Paged music');
   await mkdir(directory);
+  await scan(server, directory);
   for (let index = 0; index < 153; index++) {
     const file = path.join(directory, `Page ${index.toString().padStart(3, '0')}.wav`);
     await copyFile(sample.path, file);
@@ -480,7 +493,7 @@ async function degradedDiagnostics(binary) {
   assert.equal(health.limits.jsonLimitBytes, 1024 * 1024);
   if (apiOnly) return;
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto(degraded.base);
+  await page.goto(degraded.base + '/#local-amp=' + degraded.token);
   await page.locator('#settingsButton').click();
   const settings = page.getByRole('dialog', { name: 'Library & Playback' });
   await until(async () => /Server needs attention/.test(await settings.locator('[data-server-health]').textContent()), 'degraded tool health is actionable');
@@ -505,7 +518,7 @@ try {
     await request(server, `/api/scan/${jobId}/cancel`, 'POST');
     const canceled = await until(async () => { const result = await request(server, `/api/scan/${jobId}`); return result.finished && result; }, 'API scan cancellation');
     assert.equal(canceled.event.phase, 'failed');
-    for (const track of (await request(server, '/api/state')).tracks) await request(server, `/api/tracks/${track.id}`, 'DELETE');
+    await clearInitialLibrary(server);
     await scan(server, music);
   } else {
     const { chromium } = await import('playwright');
@@ -532,10 +545,19 @@ try {
   await apiContracts(server, music);
   const backup = await request(server, '/api/backup');
   const fresh = await startBackend(binary, 'restore');
+  for (const source of backup.sources) await scan(fresh, source.path);
   await request(fresh, '/api/backup/restore', 'POST', backup);
   const restored = await request(fresh, '/api/state');
-  assert.equal(restored.tracks.length, 3); assert.deepEqual(restored.favorites, backup.favorites);
+  const restoredBackup = await request(fresh, '/api/backup');
+  const pathsForIds = (library, ids) => ids.map(id => library.tracks.find(track => track.id === id)?.path);
+  assert.equal(restored.tracks.length, 3);
+  // Independent folder scans create new IDs. Restore remaps references to
+  // those existing tracks while preserving the corresponding music files.
+  assert.deepEqual(pathsForIds(restoredBackup, restored.favorites).sort(), pathsForIds(backup, backup.favorites).sort());
   assert.equal(restored.playlists.length, backup.playlists.length);
+  for (const playlist of backup.playlists) {
+    assert.deepEqual(pathsForIds(restoredBackup, restored.playlists.find(item => item.id === playlist.id).trackIds), pathsForIds(backup, playlist.trackIds));
+  }
   await paginationFeatures(server);
   await degradedDiagnostics(binary);
   console.log(`${apiOnly ? 'API contract' : 'Browser and API contract'} smoke passed: scan recovery/cancel, import, media ranges${apiOnly ? '' : '/playback/seek/queue'}, playlists, backup/M3U, diagnostics/limits, pagination/search/filter.`);
